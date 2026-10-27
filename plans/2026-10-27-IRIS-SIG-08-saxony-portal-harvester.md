@@ -702,7 +702,7 @@ DDL, no ORM models). This phase produces a working `docker compose up` +
 
 ### Changes Required
 
-#### 1. `pyproject.toml`
+#### 1. `pyproject.toml` ✅
 
 ```toml
 [project]
@@ -771,7 +771,7 @@ crawler, so async gains nothing and costs complexity. So it uses:
 - a sync SQLAlchemy `Engine` / `Session` with psycopg 3
 - plain synchronous pytest tests (no `pytest-asyncio`)
 
-#### 2. `docker-compose.yml`
+#### 2. `docker-compose.yml` ✅
 
 ```yaml
 services:
@@ -806,7 +806,7 @@ volumes:
   pgdata:
 ```
 
-#### 3. `.env.example`
+#### 3. `.env.example` ✅
 
 ```
 # Copy to .env (gitignored) and replace the placeholder. Never commit .env.
@@ -837,7 +837,7 @@ same variables.
 The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(URL)` renders
 it as `***`, and the engine is built with `hide_parameters=True`.
 
-#### 4. Alembic setup
+#### 4. Alembic setup ✅
 
 - `alembic.ini` -- points to `migrations/` directory. It holds **no** `sqlalchemy.url`.
 - `migrations/env.py` builds its engine from `DatabaseSettings().url` and passes the
