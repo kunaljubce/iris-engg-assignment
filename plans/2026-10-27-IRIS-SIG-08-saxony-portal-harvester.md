@@ -909,6 +909,47 @@ it as `***`, and the engine is built with `hide_parameters=True`.
 - `rows_per_page` is not in the config: page sizes are a property of the portals, and both
   adapters page until no results are left.
 
+### Choices You May Be Asked About
+
+- **Why PostGIS in Docker instead of a local install?** One `docker compose up` gives the
+  exact versions the brief names (PostgreSQL 16 / PostGIS 3.4) on any machine.
+- **Why `platform: linux/amd64`?** The official `postgis/postgis` image is amd64-only; on
+  Apple Silicon it runs under emulation. Fine for <1000 rows, and stated so it isn't a surprise.
+- **Why mount the single init SQL file, not a folder?** A folder over
+  `/docker-entrypoint-initdb.d` hides the image's own `10_postgis.sh`, so `iris` would get no
+  PostGIS.
+- **Why a separate `iris_test` database?** The db tests truncate and rewrite tables; they must
+  never touch the data a demo run produced.
+- **Why no `DATABASE_URL` in `.env`?** It repeated the password and broke on `@ : / %` unless
+  encoded by hand. `URL.create()` builds it from the `POSTGRES_*` parts compose already uses.
+- **How does the password stay out of logs?** `SecretStr` masks `repr()`, `str(URL)` shows
+  `***`, and the engine uses `hide_parameters=True`.
+- **Why hand-written SQL migrations, no ORM / autogenerate?** There are no ORM models, so
+  autogenerate has nothing to compare. The DDL in migration 001 is the single source of truth
+  and reads like the schema in this plan.
+- **Why one `op.execute()` per statement?** An error points at the failing statement.
+- **Why the Alembic version table in `iris_staging`?** A default `public.alembic_version`
+  would collide with other Alembic projects in a shared database.
+- **Why does `downgrade()` keep the `postgis` extension and the schema?** A migration only
+  removes what it alone created; other schemas may use PostGIS, and the schema holds Alembic's
+  own table.
+- **Why was migration 001 edited instead of adding 002?** It was never deployed anywhere; the
+  only database is the local demo one, rebuilt with `downgrade base && upgrade head`.
+- **Why no secondary indexes?** At <1000 rows a sequential scan is faster; the only index is
+  the one `ON CONFLICT` needs (`uq_source_record`).
+- **Why `ck_geometry_matches_status`?** It makes the database itself refuse a point without
+  `source_coordinates`, or that status without a point ("invalid coordinates are not silently
+  accepted").
+- **Why `extra="forbid"` on the config models?** A misspelt key (e.g. `keyowrds`) would
+  otherwise be ignored, leaving the filter empty and the run "succeeding" with zero matches.
+- **Why these config validators and no others?** Each one stops a mistake that would silently
+  produce wrong data (blank keyword matches everything, swapped bounding box rejects every
+  point, missing box fails only after the whole scrape).
+- **Why sync, not async?** It's a sequential, deliberately throttled crawler; async adds
+  complexity and gains nothing.
+- **Why `uv` and a committed `uv.lock`?** Every checkout resolves the same interpreter and
+  package versions.
+
 ### Success Criteria
 
 #### Automated Verification
@@ -959,7 +1000,7 @@ instances. Test with saved HTML fixtures (no live network).
 Pydantic `ScrapedRecord` model (as specified above). Also `NormalisedRecord` with all
 fields that map to the DB schema.
 
-#### 2. `src/harvester/adapters/base.py`
+#### 2. `src/harvester/adapters/base.py` ✅
 
 ```python
 from abc import ABC, abstractmethod
@@ -1087,6 +1128,52 @@ def test_no_retry_on_404(): ...
 def test_raises_fetch_error_when_retries_exhausted(): ...
 ```
 
+### Choices You May Be Asked About
+
+- **Why httpx and no browser (Playwright)?** The live checks on 2026-10-27 showed every page
+  needed is a plain GET with the data in the HTML, including the state portal's map markers.
+  A browser would add a heavy dependency and a slower, flakier test setup for nothing.
+- **Why use the marker JSON instead of the listing cards?** `map.drawMarkers([...])` holds
+  *all* results with coordinates in one response; cards show only 10 per page. No paging is
+  needed, and the "von N" count / card count is checked against it (`count_mismatch`).
+- **Why use the marker `href` for the detail URL?** A wrong city in the path redirects to the
+  listing page instead of failing; the marker's own link is always right.
+- **Why fetch detail pages only for filter matches?** Only the detail page has the
+  "Zeitraum"; fetching it for non-matches would be wasted requests on a public portal.
+- **Why only "im Verfahren" on the Leipzig city portal?** "rechtskräftig" plans are already in
+  force, not hearings. In the unfiltered sample, all 22 industrial matches were rechtskräftig.
+- **Why are Leipzig city-portal rows `unresolved`?** The source gives only a district, and the
+  detail page has no coordinates or dates. A district centroid would be an invented point;
+  `geocode_reason` says why instead.
+- **Why only 3 fixture files?** One real page per markup the code parses. Edge cases (empty
+  listing, malformed marker, next-page button, count mismatch, HTTP errors) are small inline
+  snippets in the tests. `tests/fixtures/SOURCES.md` records where each page came from and
+  what the dropped pages showed.
+- **Why `Field(default_factory=list)` and not `= []`?** Pydantic copies `[]` defaults, so it
+  isn't a bug there, but the org rule forbids mutable defaults and `default_factory` is
+  correct everywhere (dataclasses too).
+- **Why is `geocode_status` a `Literal`?** It mirrors the migration's CHECK, so a typo fails in
+  Python with a clear error before the INSERT.
+- **Why are `lon`/`lat` `float | str | None` on `ScrapedRecord` but `float | None` on
+  `NormalisedRecord`?** The scraped record keeps values as the source gives them; turning them
+  into checked floats is the pipeline's job (Phase 3).
+- **Why no validators for "point only with `source_coordinates`" or "at least one keyword"?**
+  The database CHECKs already enforce both; repeating them in Python adds code to defend and
+  nothing else.
+- **Why are `ScrapeError` / `ScrapeResult` dataclasses, not pydantic?** They're built only by
+  our own code, so there's nothing to validate. `dataclasses.asdict()` turns an error into
+  JSON for `ingest_run.errors`.
+- **Why is `ScrapeError` frozen?** It records something that happened; nothing should change it
+  afterwards.
+- **Why is `ScrapeError.kind` a plain `str`?** No database CHECK constrains it, unlike
+  `geocode_status`; the allowed values are listed in a comment.
+- **Why does `scrape()` take the `httpx.Client` as a parameter?** So tests can pass a client
+  backed by `MockTransport`. The adapter never creates its own client.
+- **Why return errors instead of raising?** One bad marker or row must not stop the run; bad
+  entries are collected next to the good ones ("errors are visible").
+- **Why `SNIPPET_MAX_CHARS = 2048`?** Enough to see what was wrong with an entry without
+  bloating `ingest_run.errors`; one constant instead of each adapter repeating 2048.
+
 ### Success Criteria
 
 #### Automated Verification
@@ -1162,6 +1249,22 @@ def test_detail_fetched_only_for_matches():      # mock client sees no request f
 def test_detail_page_404_flagged():               # detail_page_failed, listing data kept
 def test_non_industrial_records_dropped_and_counted():
 ```
+
+### Choices You May Be Asked About
+
+Decided in this plan; confirm or update each one as the step is built.
+
+- **Why match on the title (and Leipzig Thema) only, not descriptions?** Descriptions mention
+  neighbouring commercial areas and produce false positives.
+- **Why substring matching for long keywords but whole tokens for GE/GI/GVZ?** German compounds
+  ("Gewerbestandort") need substring hits; short codes as substrings would hit ordinary words
+  ("gegen").
+- **Why check the bounding box in Python, before the database?** A bad point is never written;
+  the row is stored with `geometry = NULL`, `rejected_out_of_bounds` and the reason.
+- **Why is the check written as "inside" (`min <= v <= max`)?** NaN fails every comparison, so
+  it's rejected too.
+- **Why is `publication_date` the start of "Zeitraum"?** That's the first day the plan is
+  publicly available (BauGB § 3 (2)); the raw text stays in `raw_data`.
 
 ### Success Criteria
 
@@ -1259,6 +1362,23 @@ def test_full_pipeline_twice_is_idempotent(db_session, mock_client):
 def test_errors_visible_in_ingest_run(db_session, mock_client):
     """Malformed marker and 404 detail page appear in ingest_run.errors / quality_flags."""
 ```
+
+### Choices You May Be Asked About
+
+Decided in this plan; confirm or update each one as the step is built.
+
+- **How is the run idempotent?** `UNIQUE (source, source_record_id)` plus `ON CONFLICT DO
+  UPDATE`; a re-run can't add rows.
+- **Why no change detection (hash column)?** Nothing in the brief consumes "what changed"; an
+  existing row is simply rewritten with the latest values.
+- **How are inserted vs updated counted?** `RETURNING (xmax = 0)`: true only for a freshly
+  inserted row.
+- **Why de-duplicate the batch in Python first?** PostgreSQL rejects an `ON CONFLICT DO UPDATE`
+  that hits the same key twice in one statement; each dropped duplicate is logged.
+- **Why the EPSG:25832 transform in SQL?** `ST_Transform` in the upsert keeps pyproj out of the
+  dependencies; a test checks a control point.
+- **Why are rows never deleted?** A plan missing from one run may just be a portal hiccup;
+  staging keeps what was seen, with `updated_at` as "last seen".
 
 ### Success Criteria
 
@@ -1412,6 +1532,16 @@ def test_report_lists_errors_and_quality_flags(db_session_with_data):
 
 The report also prints quality-flag counts (e.g. `missing_publication_date: 214`) and
 filter evidence for spotting false positives.
+
+### Choices You May Be Asked About
+
+Decided in this plan; confirm or update each one as the step is built.
+
+- **Why are the two portals' copies of the same plan separate rows?** Each is a signal with its
+  own URL and source ID; merging them is future work. Validation query 6 lists the pairs by
+  city and plan number (e.g. Nr. 911).
+- **Why EPSG:25832 although both cities lie east of 12° E?** The brief requires it; it's usable
+  there with growing scale distortion, documented in the README.
 
 ### Success Criteria
 
