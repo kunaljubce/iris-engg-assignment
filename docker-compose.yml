@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-iris}
+      POSTGRES_USER: ${POSTGRES_USER:-iris}
+      # No default: compose fails fast if .env doesn't set it
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the separate iris_test database used by the db-marked tests
+      - ./docker/initdb/20_create_test_db.sql:/docker-entrypoint-initdb.d/20_create_test_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

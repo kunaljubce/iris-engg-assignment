@@ -112,7 +112,7 @@ iris-engg-assignment/
   docker-compose.yml                # postgis/postgis:16-3.4, credentials from .env
   docker/
     initdb/
-      01_create_test_db.sql         # creates iris_test database + postgis extension
+      20_create_test_db.sql         # creates iris_test database + postgis extension
   .env.example                      # placeholders only (no secrets committed)
   config/
     settings.yaml                   # city/source list, keyword list, bounding boxes
@@ -125,7 +125,8 @@ iris-engg-assignment/
   src/
     harvester/
       __init__.py
-      __main__.py                   # CLI entry point
+      __main__.py                   # `python -m harvester`: calls cli.main()
+      cli.py                        # click CLI; `harvester` console script (pyproject)
       config.py                     # pydantic-settings, loads settings.yaml
       models.py                     # ScrapedRecord, IngestRun, NormalisedRecord
       db/
@@ -729,7 +730,7 @@ dependencies = [
     "playwright>=1.48",
     "beautifulsoup4>=4.12",
     "sqlalchemy>=2.0",
-    "geoalchemy2>=0.15",
+    "geoalchemy2[shapely]>=0.15",   # shapely: geometry <-> Python objects
     "alembic>=1.13",
     "psycopg[binary]>=3.1",
     "pydantic>=2.5",
@@ -763,7 +764,24 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["db: needs the PostGIS test database (TEST_DATABASE_URL)"]
+addopts = "--strict-markers"   # a typo'd marker fails instead of silently selecting nothing
+
+[build-system]
+# uv's own backend; capped at the next minor so a uv release can't change how we build
+requires = ["uv_build>=0.11.15,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Default would be src/iris_sig_08_harvester/ (derived from the project name)
+module-name = "harvester"
+
+[project.scripts]
+harvester = "harvester.cli:main"
 ```
+
+`uv.lock` and `.python-version` (3.12) are committed, so every checkout resolves the same
+interpreter and package versions. The `playwright` pin in `uv.lock` also fixes which
+Chromium build `playwright install chromium` downloads.
 
 **Sync, not async, throughout.** The harvester is a sequential, deliberately throttled
 crawler, so async gains nothing and costs complexity. So it uses:
@@ -777,6 +795,9 @@ crawler, so async gains nothing and costs complexity. So it uses:
 services:
   db:
     image: postgis/postgis:16-3.4
+    # The official image is amd64-only; on Apple Silicon it runs under emulation.
+    # Fine for <1000 rows; stated explicitly so the choice is visible.
+    platform: linux/amd64
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-iris}
       POSTGRES_USER: ${POSTGRES_USER:-iris}
@@ -786,8 +807,10 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Creates the separate iris_test database used by the db-marked tests
-      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+      # Creates the separate iris_test database used by the db-marked tests.
+      # Mount the single file: mounting a folder over /docker-entrypoint-initdb.d would
+      # hide the image's own 10_postgis.sh, and PostGIS would never be installed in `iris`.
+      - ./docker/initdb/20_create_test_db.sql:/docker-entrypoint-initdb.d/20_create_test_db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
       interval: 5s
@@ -839,6 +862,8 @@ Pydantic-settings model loading `settings.yaml` and `DATABASE_URL` from environm
 
 #### Automated Verification
 - [ ] `docker compose up -d` starts PostgreSQL with PostGIS (and fails clearly if `.env` is missing)
+- [ ] `SELECT PostGIS_Version()` works in both `iris` and `iris_test`; the logs show both
+      `10_postgis.sh` and `20_create_test_db.sql` ran
 - [ ] `alembic upgrade head` creates schema and tables without errors
 - [ ] `alembic downgrade base` + `alembic upgrade head` is idempotent
 - [ ] `ruff check src/` passes
@@ -1132,7 +1157,7 @@ and integration tests including idempotent re-run and duplicate detection.
   `RETURNING` as described there.
 - `load_listing_hashes(session, source) -> dict[str, str]` feeds incremental mode.
 
-#### 2. `src/harvester/__main__.py`
+#### 2. `src/harvester/cli.py` (+ `__main__.py`)
 
 ```python
 @click.group()
