@@ -861,14 +861,25 @@ it as `***`, and the engine is built with `hide_parameters=True`.
 - `migrations/env.py` builds its engine from `DatabaseSettings().url` and passes the
   connection to Alembic. Don't copy the URL into the ini with `set_main_option()`: it
   needs the plain-text password, and configparser treats `%` in it as interpolation.
+- **Offline mode** (`alembic upgrade head --sql`) configures only `dialect_name="postgresql"`,
+  so the SQL script can be produced without a `.env` or a running database.
+- **Version table in our schema:** `version_table_schema="iris_staging"`. A default
+  `public.alembic_version` would collide with any other Alembic-managed project in a shared
+  database. Alembic creates its table before migration 001 runs, so `env.py` runs
+  `CREATE SCHEMA IF NOT EXISTS iris_staging` first (committed separately online; emitted at
+  the top of the script offline).
+- `alembic.ini` post-write hooks run `ruff check --fix` and `ruff format` on every generated
+  revision. Generate with `--rev-id 001` etc. so file names follow `001_<slug>.py`.
 - `migrations/env.py` -- standard Alembic env with SQLAlchemy metadata from `schema.py`.
 - `migrations/versions/001_create_schema_and_tables.py`:
   - `CREATE EXTENSION IF NOT EXISTS postgis`
   - `CREATE SCHEMA IF NOT EXISTS iris_staging`
   - Create `iris_staging.ingest_run` table
   - Create `iris_staging.signal_ingest` table with all columns, indexes, and constraints
-  - `downgrade()` drops the two tables and the `iris_staging` schema but **not** the `postgis`
-    extension, which other schemas in a shared database may depend on
+  - `downgrade()` drops **only the two tables**. It keeps the `postgis` extension, which other
+    schemas in a shared database may depend on, and the `iris_staging` schema, which holds
+    Alembic's version table and may hold other pipelines' tables. Same rule for both: a
+    migration only removes what it alone owns.
 
 #### 5. `src/harvester/db/schema.py`
 

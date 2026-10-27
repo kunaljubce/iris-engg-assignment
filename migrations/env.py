@@ -1,71 +1,65 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
 from alembic import context
+from sqlalchemy import create_engine, pool, text
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+from harvester.config import DatabaseSettings
+
+# Alembic Config object: access to the values in alembic.ini
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# Set up Python logging from alembic.ini
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
+# Step 2 points this at harvester.db.schema's Base.metadata for autogenerate support
 target_metadata = None
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# Everything this project owns lives in one schema, including Alembic's own version table.
+# In a shared database, a default public.alembic_version would collide with any other
+# Alembic-managed project. Step 2 moves this constant next to the ORM models.
+STAGING_SCHEMA = "iris_staging"
+VERSION_TABLE_SCHEMA = STAGING_SCHEMA
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
+    """Emit the migration SQL to stdout (`alembic upgrade --sql`) without connecting.
 
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
+    Only the dialect is needed, so this works without a .env or a running database.
     """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        dialect_name="postgresql",
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema=VERSION_TABLE_SCHEMA,
     )
 
     with context.begin_transaction():
+        # The version table is created before the first migration runs, so its schema
+        # has to exist first
+        context.execute(f"CREATE SCHEMA IF NOT EXISTS {STAGING_SCHEMA}")
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    """Run migrations against the database configured by the POSTGRES_* settings."""
+    engine = create_engine(
+        DatabaseSettings().url,
         poolclass=pool.NullPool,
+        hide_parameters=True,
     )
 
-    with connectable.connect() as connection:
+    with engine.connect() as connection:
+        # Committed separately so Alembic's own transaction starts clean and can create
+        # the version table inside the schema
+        connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {STAGING_SCHEMA}"))
+        connection.commit()
+
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema=VERSION_TABLE_SCHEMA,
         )
 
         with context.begin_transaction():

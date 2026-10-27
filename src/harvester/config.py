@@ -1,7 +1,7 @@
 """Runtime configuration.
 
-Database settings come from the same POSTGRES_* variables that docker-compose.yml uses, so the 
-password lives in exactly one place (.env). The SQLAlchemy URL is assembled here rather than 
+Database settings come from the same POSTGRES_* variables that docker-compose.yml uses, so the
+password lives in exactly one place (.env). The SQLAlchemy URL is assembled here rather than
 written by hand, which percent-encodes special characters in the password.
 """
 
