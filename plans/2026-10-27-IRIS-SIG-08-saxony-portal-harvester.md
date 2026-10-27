@@ -214,18 +214,9 @@ iris-engg-assignment/
     conftest.py                     # fixture loader, httpx MockTransport, DB fixtures
     fixtures/
       SOURCES.md                    # provenance: source URL + capture date per fixture
-      sachsen_dresden_listing.html
-      sachsen_dresden_listing_beendet.html
-      sachsen_dresden_detail.html
-      sachsen_leipzig_listing.html
-      sachsen_leipzig_listing_beendet.html
-      sachsen_leipzig_detail.html
-      sachsen_empty_listing.html      # hand-edited: no markers, no cards
-      sachsen_malformed_markers.html  # hand-edited: bad markers (see Phase 2)
-      leipzig_stadt_listing_im_verfahren.html
-      leipzig_stadt_listing.html      # unfiltered page 1, for the pagination test
-      leipzig_stadt_listing_page2.html
-      leipzig_stadt_detail.html       # kept as evidence that detail pages add nothing
+      sachsen_dresden_listing_beendet.html     # marker JSON, "von 52"
+      sachsen_dresden_detail.html              # "Zeitraum"
+      leipzig_stadt_listing_im_verfahren.html  # rows, districts, Thema
     test_sachsen_adapter.py
     test_leipzig_adapter.py
     test_fetch.py                   # retry on 5xx/429/timeouts, no retry on 4xx
@@ -615,7 +606,7 @@ in `records_rejected`); the others are still parsed.
    - `location_text`: the districts joined with `"; "`
 3. `parse_next_page(html)`: `data-next` of `.start-ajax-pagination`, or None. While there is
    one, GET the same URL plus `tx_lepurpose[filter][page]=N`. Today the filtered list fits on
-   one page; the loop is tested on the unfiltered page 1 / page 2 fixtures.
+   one page; the loop is tested with a snippet page carrying the real button markup.
 4. No detail pages: they hold nothing the row lacks (Key Discovery 3). Every row is
    `unresolved` with no publication date.
 
@@ -1019,22 +1010,23 @@ retries run out or on a non-retryable 4xx; adapters turn that into a `ScrapeErro
 
 #### 6. Test fixtures
 
-Captured 2026-10-27, **once, by hand** with `curl` (harvester user agent, 2 s apart), kept
-whole; provenance in `tests/fixtures/SOURCES.md`, which covers "source access ... must be
-verified". The tests' reproducibility comes from the committed files, not from how they were
-downloaded.
+**One real page per markup the code parses**; every edge case is a minimal HTML snippet
+inside its test, so the test shows exactly what is wrong with the input. Captured 2026-10-27,
+**once, by hand** with `curl` (harvester user agent, 2 s apart), kept whole; provenance in
+`tests/fixtures/SOURCES.md`, which covers "source access ... must be verified". It also lists
+the pages checked but not kept (other cities and statuses use the same markup; the city
+portal's detail page isn't parsed). The tests' reproducibility comes from the committed files,
+not from how they were downloaded.
 
-- `sachsen_dresden_listing.html`: AKTUELLE, 8 markers (2 industrial)
-- `sachsen_dresden_listing_beendet.html`: BEENDETE, 52 markers (5 industrial), "von 52"
-- `sachsen_leipzig_listing.html` (2 markers), `sachsen_leipzig_listing_beendet.html` (21, 2 industrial)
-- `sachsen_dresden_detail.html`, `sachsen_leipzig_detail.html`: "Zeitraum" element
-- `leipzig_stadt_listing_im_verfahren.html`: 39 rows, 10 industrial, no next page
-- `leipzig_stadt_listing.html`, `leipzig_stadt_listing_page2.html`: unfiltered, `data-next` 2 / 3
-- `leipzig_stadt_detail.html`: not parsed; evidence that detail pages add nothing
-- Still to make (hand-edited copies of a state-portal listing, noted in `SOURCES.md`):
-  - `sachsen_empty_listing.html`: cards removed, `drawMarkers([])`
-  - `sachsen_malformed_markers.html`: one marker without `id`, one with swapped lat/lon,
-    one with `latitude: ""`
+- `sachsen_dresden_listing_beendet.html`: 52 markers (5 industrial, titles with `&quot;`),
+  10 cards, "von 52"
+- `sachsen_dresden_detail.html`: "Zeitraum 12.10.2026 bis 13.11.2026"
+- `leipzig_stadt_listing_im_verfahren.html`: 39 rows (10 industrial, several with multiple
+  districts / Thema values), no next-page button
+
+Inline snippets: empty listing, cards without marker JSON, marker without `id`, swapped / empty
+/ non-numeric coordinates, "von 52" against 51 markers, the next-page button (copied from
+the live markup in `SOURCES.md`), and HTTP errors via `MockTransport`.
 
 #### 7. `tests/conftest.py`
 
@@ -1049,25 +1041,25 @@ downloaded.
 
 ```python
 def test_parses_markers():
-    """id, unescaped title, city-correct detail_url, lon/lat, address from the Dresden fixture."""
+    """id, unescaped title, city-correct detail_url, lon/lat, address from the fixture."""
 
-def test_beendet_listing_has_all_results():
-    """52 markers although only 10 cards are rendered."""
+def test_listing_has_all_results():
+    """52 markers although only 10 cards are rendered; matches 'von 52'."""
 
 def test_count_mismatch_logged():
-    """'von 52' but 51 markers -> count_mismatch error, markers still returned."""
+    """Snippet: 'von 52' but 51 markers -> count_mismatch error, markers still returned."""
 
 def test_parses_zeitraum_from_detail():
     """'Zeitraum 12.10.2026 bis 13.11.2026' from the detail fixture."""
 
 def test_handles_empty_listing():
-    """No markers, no cards -> no records, no errors, no exception."""
+    """Snippet: no markers, no cards -> no records, no errors, no exception."""
 
 def test_cards_without_markers_is_an_error():
-    """Cards present but no marker JSON -> markers_not_found error."""
+    """Snippet: cards present but no marker JSON -> markers_not_found error."""
 
 def test_handles_malformed_markers():
-    """Marker without id -> ScrapeError; the others still parsed."""
+    """Snippet: marker without id -> ScrapeError; the others still parsed."""
 ```
 
 #### 9. `tests/test_leipzig_adapter.py`
@@ -1080,7 +1072,7 @@ def test_splits_districts_and_thema():
     """'West / Schönau', 'Alt-West / ...' -> location_text; 'Gewerbe', 'Sondergebiet' -> thema."""
 
 def test_follows_next_page():
-    """Page 1 (data-next=2) and page 2 are both fetched; stops when no button."""
+    """Snippet page 1 with data-next=2, then the fixture (no button) as page 2: both fetched, then stop."""
 ```
 
 #### 10. `tests/test_fetch.py`
@@ -1102,7 +1094,7 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 
 #### Manual Verification
 - [x] Fixture HTML files are whole, unedited captures of the live portals (2026-10-27)
-- [ ] `tests/fixtures/SOURCES.md` lists every fixture, including the hand-edited ones
+- [x] `tests/fixtures/SOURCES.md` lists every fixture and the pages checked but not kept
 - [x] Status-filter mechanism, publication-date element and ID scope confirmed (Key Discoveries 5-8)
 - [ ] `ScrapedRecord` fields match expectations for each fixture
 
