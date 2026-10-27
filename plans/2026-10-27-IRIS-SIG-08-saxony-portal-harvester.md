@@ -78,7 +78,7 @@ docker compose up -d
 alembic upgrade head
 python -m harvester run --dry-run   # prints normalised records, no DB write
 python -m harvester run             # full ingest
-psql "$DATABASE_URL" -f sql/validation_queries.sql
+docker compose exec -T db psql -U iris -d iris < sql/validation_queries.sql
 ```
 
 ---
@@ -108,7 +108,7 @@ centroid lookup, and upserts into PostGIS.
 ```
 iris-engg-assignment/
   pyproject.toml                    # project metadata, dependencies, tool config
-  alembic.ini                       # Alembic config (reads DATABASE_URL from env)
+  alembic.ini                       # Alembic config (no URL; env.py uses DatabaseSettings)
   docker-compose.yml                # postgis/postgis:16-3.4, credentials from .env
   docker/
     initdb/
@@ -127,11 +127,11 @@ iris-engg-assignment/
       __init__.py
       __main__.py                   # `python -m harvester`: calls cli.main()
       cli.py                        # click CLI; `harvester` console script (pyproject)
-      config.py                     # pydantic-settings, loads settings.yaml
+      config.py                     # pydantic-settings: POSTGRES_* -> DB URL; settings.yaml
       models.py                     # ScrapedRecord, IngestRun, NormalisedRecord
       db/
         __init__.py
-        engine.py                   # SQLAlchemy engine from DATABASE_URL
+        engine.py                   # SQLAlchemy engine from DatabaseSettings().url
         schema.py                   # GeoAlchemy2 ORM: signal_ingest, ingest_run
         upsert.py                   # INSERT ... ON CONFLICT with content_hash
       adapters/
@@ -763,7 +763,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["db: needs the PostGIS test database (TEST_DATABASE_URL)"]
+markers = ["db: needs the PostGIS test database (POSTGRES_* settings)"]
 addopts = "--strict-markers"   # a typo'd marker fails instead of silently selecting nothing
 
 [build-system]
@@ -804,7 +804,8 @@ services:
       # No default: compose fails fast if .env doesn't set it
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port follows POSTGRES_PORT, the same variable config.py uses to connect
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Creates the separate iris_test database used by the db-marked tests.
@@ -812,7 +813,9 @@ services:
       # hide the image's own 10_postgis.sh, and PostGIS would never be installed in `iris`.
       - ./docker/initdb/20_create_test_db.sql:/docker-entrypoint-initdb.d/20_create_test_db.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      # -h 127.0.0.1 checks over TCP. During first-start init, Postgres runs a temporary
+      # socket-only server, so this stays unhealthy until the init scripts have finished.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -825,22 +828,39 @@ volumes:
 
 ```
 # Copy to .env (gitignored) and replace the placeholder. Never commit .env.
+# docker-compose.yml and the harvester (src/harvester/config.py) both read these, so the
+# password is set once. The connection URL is built from them; no need to URL-encode it.
 POSTGRES_USER=iris
-POSTGRES_DB=iris
 POSTGRES_PASSWORD=<choose-a-local-password>
-DATABASE_URL=postgresql+psycopg://iris:<same-password>@localhost:5432/iris
-TEST_DATABASE_URL=postgresql+psycopg://iris:<same-password>@localhost:5432/iris_test
+POSTGRES_DB=iris
+# Database for the db-marked tests. Must match the name created in
+# docker/initdb/20_create_test_db.sql
+POSTGRES_TEST_DB=iris_test
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+
 # Optional: append an operator contact to the scraper's user agent
 # HARVESTER_USER_AGENT="IRIS-SIG-08-Harvester/1.0 (bot; contact: you@example.org)"
 ```
 
 The repo commits no credential, not even a dev default. `.env` is already in `.gitignore`.
-The harvester never logs `DATABASE_URL`: the engine is built with `hide_parameters=True`,
-and connection errors are logged with the password masked.
+
+**No hand-written connection URL.** An earlier draft had `DATABASE_URL` and
+`TEST_DATABASE_URL` next to `POSTGRES_PASSWORD`. That put the password in three places that
+could drift apart, and a password containing `@`, `:`, `/` or `%` broke the URL unless
+percent-encoded by hand. Now `config.py` builds both URLs from the `POSTGRES_*` parts with
+`sqlalchemy.engine.URL.create()`, which does the encoding. Compose and the harvester read the
+same variables.
+
+The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(URL)` renders
+it as `***`, and the engine is built with `hide_parameters=True`.
 
 #### 4. Alembic setup
 
-- `alembic.ini` -- points to `migrations/` directory, reads `DATABASE_URL` from env.
+- `alembic.ini` -- points to `migrations/` directory. It holds **no** `sqlalchemy.url`.
+- `migrations/env.py` builds its engine from `DatabaseSettings().url` and passes the
+  connection to Alembic. Don't copy the URL into the ini with `set_main_option()`: it
+  needs the plain-text password, and configparser treats `%` in it as interpolation.
 - `migrations/env.py` -- standard Alembic env with SQLAlchemy metadata from `schema.py`.
 - `migrations/versions/001_create_schema_and_tables.py`:
   - `CREATE EXTENSION IF NOT EXISTS postgis`
@@ -856,7 +876,12 @@ GeoAlchemy2 ORM models for `signal_ingest` and `ingest_run`, matching the SQL ab
 
 #### 6. `src/harvester/config.py`
 
-Pydantic-settings model loading `settings.yaml` and `DATABASE_URL` from environment.
+- **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`,
+  `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or
+  `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by
+  `tests/test_config.py`: a password with special characters survives the URL round trip, the
+  password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
+- **To do:** the model that loads `config/settings.yaml` (sources, keywords, bounding boxes).
 
 ### Success Criteria
 
@@ -1176,8 +1201,8 @@ def report(): ...
 
 #### 3. `src/harvester/db/engine.py`
 
-Sync SQLAlchemy `Engine` (psycopg 3) from the `DATABASE_URL` environment variable,
-created with `hide_parameters=True`. A missing `DATABASE_URL` fails with a clear message.
+Sync SQLAlchemy `Engine` (psycopg 3) from `DatabaseSettings().url`, created with
+`hide_parameters=True`. A missing `POSTGRES_PASSWORD` fails with a clear message.
 `--dry-run` needs no database.
 
 #### 4. Integration tests
@@ -1410,13 +1435,14 @@ filter evidence for spotting false positives.
   element-level tests). A catch-all route **aborts any request not matched to a fixture**,
   so tests can never reach the live portals.
 - **Database:** the PostGIS `iris_test` database from `docker compose`, at
-  `TEST_DATABASE_URL`. There is **no SQLite/SpatiaLite fallback**: the upsert depends on
+  `DatabaseSettings().test_url`. There is **no SQLite/SpatiaLite fallback**: the upsert depends on
   PostgreSQL-only features (`ON CONFLICT`, `xmax`, `ST_Transform`, `TEXT[]`), so a
   different engine would test different behaviour.
   - A session-scoped fixture runs `alembic upgrade head` against `iris_test`.
   - Each test runs in a transaction that is rolled back afterwards.
-  - Tests marked `db` are **skipped with an explicit reason** if `TEST_DATABASE_URL` is
-    unset. The non-DB suite (parsing, filter, normalise, geocode, fetch) runs with no Docker.
+  - Tests marked `db` are **skipped with an explicit reason** if the database settings can't
+    be loaded (no `POSTGRES_PASSWORD` in the environment or `.env`). If they load but the
+    database is unreachable, the tests **fail**: configured-but-broken is an error, not a skip. The non-DB suite (parsing, filter, normalise, geocode, fetch) runs with no Docker.
 
 ---
 

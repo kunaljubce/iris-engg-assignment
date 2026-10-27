@@ -8,13 +8,16 @@ services:
       # No default: compose fails fast if .env doesn't set it
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port follows POSTGRES_PORT, the same variable config.py uses to connect
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Creates the separate iris_test database used by the db-marked tests
       - ./docker/initdb/20_create_test_db.sql:/docker-entrypoint-initdb.d/20_create_test_db.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      # -h 127.0.0.1 checks over TCP. During first-start init, Postgres runs a temporary
+      # socket-only server, so this stays unhealthy until the init scripts have finished.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
