@@ -18,8 +18,8 @@ SNIPPET_MAX_CHARS = 2048
 @dataclass(frozen=True)
 class ScrapeError:
     url: str
-    # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch' | 'http_4xx'
-    # | 'retries_exhausted'
+    # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
+    # | 'unexpected_row_layout' | 'unexpected_status' | 'http_4xx' | 'retries_exhausted'
     kind: str
     message: str
     snippet: str | None = None  # marker JSON entry or row HTML, cut to SNIPPET_MAX_CHARS

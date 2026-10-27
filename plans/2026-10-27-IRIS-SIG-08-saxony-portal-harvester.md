@@ -602,16 +602,22 @@ in `records_rejected`); the others are still parsed.
 
 1. GET `{base_url}{listing_path}?tx_lepurpose[filter][89][]={status_filter_id}` (only "im
    Verfahren"; Key Discovery 8).
-2. `parse_rows(html)` for each `tr[id^="project-"]`:
+2. `parse_rows(html, page_url)` for each `tr[id^="project-"]`:
    - `source_record_id`: from the `tr` id (`project-1751` -> `1751`)
-   - title and `detail_url`: `a.filterlist-detailpage` (text without the trailing
-     `arrow_forward` icon text, and href)
-   - cells: `td > ul > li` texts. The first is the status; cells containing `" / "` are
-     districts ("Nord / Eutritzsch"; a row can have several); the rest are Thema values
+   - title and `detail_url`: `a.filterlist-detailpage` (text of its `span:not(.icon)`, i.e.
+     without the trailing `arrow_forward` icon text, and href)
+   - cells **by column position**, as in the table header (image, Titel, Status, Stadtbezirk/
+     Ortsteil, Thema); each cell's `ul > li` texts. A row can have several districts
+     ("Nord / Eutritzsch") and several Thema values, or none. Fewer cells than that ->
+     `unexpected_row_layout` error
+   - status must be exactly `["im Verfahren"]`, else `unexpected_status` error and the row is
+     not stored: if the portal ever ignored the filter parameter, plans in force would
+     otherwise be stored as hearings
    - `location_text`: the districts joined with `"; "`
+   - `raw_data` = `{"status", "districts", "thema", "listing_url"}`
 3. `parse_next_page(html)`: `data-next` of `.start-ajax-pagination`, or None. While there is
-   one, GET the same URL plus `tx_lepurpose[filter][page]=N`. Today the filtered list fits on
-   one page; the loop is tested with a snippet page carrying the real button markup.
+   one, GET the same URL plus `tx_lepurpose[filter][page]=N`; only forward (N greater than the
+   current page), so a bad button can't loop. Today the filtered list fits on one page; the loop is tested with a snippet page carrying the real button markup.
 4. No detail pages: they hold nothing the row lacks (Key Discovery 3). Every row is
    `unresolved` with no publication date.
 
@@ -981,7 +987,7 @@ it as `***`, and the engine is built with `hide_parameters=True`.
 
 ---
 
-## Phase 2: Adapters and HTML Parsing
+## Phase 2: Adapters and HTML Parsing ✅
 
 ### Overview
 
@@ -1017,7 +1023,8 @@ from harvester.models import ScrapedRecord
 @dataclass(frozen=True)
 class ScrapeError:
     url: str
-    kind: str              # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch' | 'http_4xx' | 'retries_exhausted'
+    kind: str              # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
+                           # | 'unexpected_row_layout' | 'unexpected_status' | 'http_4xx' | 'retries_exhausted'
     message: str
     snippet: str | None = None  # marker JSON entry or row HTML, truncated to 2 KB
 
@@ -1064,14 +1071,16 @@ raises `FetchError(kind, url, status, message)` when retries run out or on a non
 - `fetch_detail(client, record, settings) -> ScrapedRecord`: used by the pipeline for matches
   only. It lets `FetchError` through; the pipeline turns it into `detail_page_failed`.
 
-#### 5. `src/harvester/adapters/leipzig_stadtportal.py`
+#### 5. `src/harvester/adapters/leipzig_stadtportal.py` ✅
 
 - `scrape(client, source: LeipzigStadtSource, settings) -> ScrapeResult`: follows the next-page
   button until there is none.
-- `parse_rows(html) -> tuple[list[ScrapedRecord], list[ScrapeError]]`
+- `listing_url(source, page=1) -> str`
+- `parse_rows(html, page_url) -> tuple[list[ScrapedRecord], list[ScrapeError]]`
 - `parse_next_page(html) -> int | None`
+- A page that fails to fetch ends the loop with a `ScrapeError`; records already read are kept.
 
-#### 6. Test fixtures
+#### 6. Test fixtures ✅
 
 **One real page per markup the code parses**; every edge case is a minimal HTML snippet
 inside its test, so the test shows exactly what is wrong with the input. Captured 2026-10-27,
@@ -1143,17 +1152,31 @@ def test_fetch_detail_adds_zeitraum(): ...
 def test_fetch_detail_failure_raises(): ...
 ```
 
-#### 9. `tests/test_leipzig_adapter.py`
+#### 9. `tests/test_leipzig_adapter.py` ✅
 
 ```python
 def test_parses_rows():
-    """ID, title without icon text, detail_url, status from the im-Verfahren fixture."""
+    """39 rows; ID, title without icon text, detail_url, status; no coordinates or date."""
 
 def test_splits_districts_and_thema():
-    """'West / Schönau', 'Alt-West / ...' -> location_text; 'Gewerbe', 'Sondergebiet' -> thema."""
+    """Nr. 485: 'West / Schönau; Alt-West / ...' -> location_text; 3 Thema values."""
+
+def test_row_without_thema_has_empty_list(): ...
+
+def test_unexpected_status_is_an_error():
+    """Snippet: a 'rechtskräftig' row -> unexpected_status, not stored."""
+
+def test_handles_malformed_rows():
+    """Snippet: no title link -> missing_title; too few cells -> unexpected_row_layout."""
+
+def test_parse_next_page():
+    """Real button markup -> 2; the fixture (no button) -> None."""
 
 def test_follows_next_page():
     """Snippet page 1 with data-next=2, then the fixture (no button) as page 2: both fetched, then stop."""
+
+def test_failed_page_is_an_error():
+    """503 -> retries_exhausted error, no records, no exception."""
 ```
 
 #### 10. `tests/test_fetch.py` ✅
@@ -1232,6 +1255,17 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 - **Why `source = "sachsen_portal"` as a module constant, not from the config `name`?** It is
   the identifier stored in the database's natural key; it must not change if someone renames
   the config entry.
+- **Why read the Leipzig cells by column position, not by content?** The table header fixes
+  the order (Titel, Status, Stadtbezirk/ Ortsteil, Thema). Guessing "contains ` / ` means
+  district" would misfile any Thema value that ever contains " / ". Too few cells is an error.
+- **Why check each Leipzig row's status when the URL already filters on it?** The state portal
+  silently ignores a lowercase status; if the city portal ever ignored its filter, ~500 plans
+  already in force would be stored as hearings. A row that isn't "im Verfahren" becomes an
+  `unexpected_status` error: visible, not stored.
+- **Why no Leipzig detail pages?** Checked on 2026-10-27: they show only district, Thema,
+  status and plan PDFs, nothing the row lacks. Fetching them would be ~40 requests for nothing.
+- **Why does the page loop only move forward?** A next-page button pointing to the same or an
+  earlier page would otherwise loop forever against a public portal.
 - **Why `tests/__init__.py`?** It lets test modules import helpers from `tests.conftest`
   without mypy seeing the file under two module names.
 - **Why return errors instead of raising?** One bad marker or row must not stop the run; bad
@@ -1262,15 +1296,18 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `pytest tests/test_sachsen_adapter.py tests/test_leipzig_adapter.py tests/test_fetch.py` -- all pass
-- [ ] `ruff check src/harvester/adapters/` passes
-- [ ] `mypy src/harvester/adapters/ src/harvester/models.py` passes
+- [x] `pytest tests/test_sachsen_adapter.py tests/test_leipzig_adapter.py tests/test_fetch.py` -- all pass
+- [x] `ruff check src/harvester/adapters/` passes
+- [x] `mypy src/harvester/adapters/ src/harvester/models.py` passes
 
 #### Manual Verification
 - [x] Fixture HTML files are whole, unedited captures of the live portals (2026-10-27)
 - [x] `tests/fixtures/SOURCES.md` lists every fixture and the pages checked but not kept
 - [x] Status-filter mechanism, publication-date element and ID scope confirmed (Key Discoveries 5-8)
-- [ ] `ScrapedRecord` fields match expectations for each fixture
+- [x] `ScrapedRecord` fields match expectations for each fixture (checked by hand against the pages, 2026-10-28)
+- [x] Live smoke run of both `scrape()` functions (2026-10-28): state portal 83 records
+      (Dresden 60, Leipzig 23), city portal 39, no errors; a live Leipzig state-portal
+      detail page gave its Zeitraum (body-class check holds for Leipzig too)
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 3.
 
