@@ -1317,9 +1317,12 @@ Generated from a real run against the portals. CSV with all columns. GeoJSON wit
 
 Full README covering:
 - Project description and scope
-- Prerequisites (Python 3.12+, Docker, Playwright)
-- Quick start (`docker compose up`, `alembic upgrade head`, `playwright install chromium`,
-  `python -m harvester run`)
+- Prerequisites (uv, Docker; uv provides Python 3.12 via `.python-version`)
+- Setup (`uv sync`, `uv run playwright install chromium`, `.env`, `docker compose up -d`,
+  `uv run alembic upgrade head`), started in Phase 1 and extended as steps are added.
+  Note that the Chromium download is version-locked to the `playwright` pin in `uv.lock`
+  and must be re-run after upgrading Playwright.
+- Quick start (`uv run harvester run`)
 - Configuration (`settings.yaml`, environment variables)
 - Architecture overview (adapters, pipeline, DB)
 - Testing (`pytest`)
@@ -1413,6 +1416,22 @@ filter evidence for spotting false positives.
 - First run: `alembic upgrade head` creates everything from scratch.
 - Subsequent schema changes: add new Alembic migration files.
 - No existing data to migrate (greenfield).
+
+---
+
+## Nice to Have
+
+Not required for acceptance. Pick up only once Phases 1-5 are done.
+
+- **One-command setup via `Makefile` or `justfile`.** The README setup steps stay the
+  source of truth; the task runner only wraps them. Suggested targets:
+  - `setup`: `uv sync` + `uv run playwright install chromium`
+  - `db-up` / `db-reset`: `docker compose up -d` / `docker compose down -v && docker compose up -d`
+  - `migrate`: `uv run alembic upgrade head`
+  - `test`, `lint` (`ruff check .` + `mypy`), `run` (`uv run harvester run`)
+
+  `make` ships with macOS and most Linux systems; `just` reads better but is an extra
+  install. Either way, don't hide steps the README doesn't also list.
 
 ---
 

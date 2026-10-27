@@ -1,0 +1,53 @@
+[project]
+name = "iris-sig-08-harvester"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "playwright>=1.48",
+    "beautifulsoup4>=4.12",
+    "sqlalchemy>=2.0",
+    "geoalchemy2[shapely]>=0.15",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "pyyaml>=6.0",
+    "pyproj>=3.6",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "types-PyYAML",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# SQLAlchemy 2.0 typing works natively via Mapped[]; the old sqlalchemy.ext.mypy plugin is deprecated
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["db: needs the PostGIS test database (TEST_DATABASE_URL)"]
+addopts = "--strict-markers"
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "harvester"
+
+[project.scripts]
+harvester = "harvester.cli:main"
