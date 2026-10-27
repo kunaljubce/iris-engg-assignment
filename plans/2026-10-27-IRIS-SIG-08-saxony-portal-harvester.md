@@ -9,7 +9,13 @@ idempotent upserts and full auditability.
 
 **Scope:** Dresden and Leipzig city portals only; surrounding districts deferred.
 
-**Branch:** `feature/IRIS-SIG-08-portal-harvester`
+**This is a sample solution for an exercise, not a production system.** The repo matters for
+a few weeks and is demonstrated from a fresh database. Add something only if it serves the
+brief's acceptance criteria or makes the demo work. Leave out production hardening for a
+future the repo won't have (schema evolution over many migrations, multi-environment
+deployment, scale), and name it under "What We Are NOT Doing" so the omission is deliberate.
+
+**Branch:** `main`
 
 ---
 
@@ -91,6 +97,16 @@ docker compose exec -T db psql -U iris -d iris < sql/validation_queries.sql
 - Downloading or parsing PDF plan documents.
 - Building a web UI or API layer.
 - Handling BundID authentication (public pages only).
+- Production hardening (see the scope note in the Overview). For example, no SQLAlchemy
+  `naming_convention`: it only pays off when later migrations alter or drop constraints by
+  name, and this repo is expected to have the single migration `001`. Constraints and
+  indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
+- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second
+  copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the
+  `db`-marked tests run every query against it.
+- Incremental retrieval (skipping unchanged detail pages via a listing hash). The brief asks
+  for idempotent re-runs, not fast ones; every run fetches every detail page (~30 min live,
+  seconds against fixtures). A possible optimisation if live runs become frequent.
 
 ---
 
@@ -132,7 +148,6 @@ iris-engg-assignment/
       db/
         __init__.py
         engine.py                   # SQLAlchemy engine from DatabaseSettings().url
-        schema.py                   # GeoAlchemy2 ORM: signal_ingest, ingest_run
         upsert.py                   # INSERT ... ON CONFLICT with content_hash
       adapters/
         __init__.py
@@ -217,8 +232,6 @@ scraping:
   # Override via HARVESTER_USER_AGENT env var to add an operator contact address
   user_agent: "IRIS-SIG-08-Harvester/1.0 (bot)"
   page_timeout_ms: 30000
-  # Skip detail pages for listing rows whose listing_hash is unchanged (override: --full)
-  incremental: true
 
 industrial_filter:
   # Case-insensitive match anywhere inside a word, so German compounds hit
@@ -265,13 +278,15 @@ CREATE TABLE iris_staging.ingest_run (
     finished_at         TIMESTAMPTZ,
     source              TEXT NOT NULL,          -- 'sachsen_portal' | 'leipzig_stadtportal'
     city                TEXT,                   -- 'dresden' | 'leipzig' | NULL (for multi-city runs)
-    status              TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'completed' | 'failed'
-    records_scraped     INTEGER DEFAULT 0,
-    records_inserted    INTEGER DEFAULT 0,
-    records_updated     INTEGER DEFAULT 0,
-    records_unchanged   INTEGER DEFAULT 0,
-    records_rejected    INTEGER DEFAULT 0,
-    errors              JSONB DEFAULT '[]'::jsonb,
+    status              TEXT NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'completed', 'failed')),
+    -- NOT NULL so the quality report's sums never meet a NULL
+    records_scraped     INTEGER NOT NULL DEFAULT 0,
+    records_inserted    INTEGER NOT NULL DEFAULT 0,
+    records_updated     INTEGER NOT NULL DEFAULT 0,
+    records_unchanged   INTEGER NOT NULL DEFAULT 0,
+    records_rejected    INTEGER NOT NULL DEFAULT 0,
+    errors              JSONB NOT NULL DEFAULT '[]'::jsonb,
     config_snapshot     JSONB,                 -- frozen copy of settings used
     error_message       TEXT
 );
@@ -285,7 +300,6 @@ CREATE TABLE iris_staging.signal_ingest (
     source              TEXT NOT NULL,          -- 'sachsen_portal' | 'leipzig_stadtportal'
     source_record_id    TEXT NOT NULL,          -- portal-specific ID (numeric or slug)
     content_hash        TEXT NOT NULL,          -- SHA-256 of all persisted output fields (see below)
-    listing_hash        TEXT NOT NULL,          -- SHA-256 of listing-row fields only (incremental mode)
     ingest_run_id       UUID REFERENCES iris_staging.ingest_run(id),  -- run that last inserted/changed the row
     last_seen_run_id    UUID REFERENCES iris_staging.ingest_run(id),  -- run that last saw the row
 
@@ -308,10 +322,11 @@ CREATE TABLE iris_staging.signal_ingest (
     participation_start DATE,
     participation_end   DATE,
     publication_date    DATE,                   -- only from an explicit publication field; never derived
-    date_source         TEXT,                   -- 'listing_card' | 'detail_page' | NULL if no date found
+    date_source         TEXT                    -- NULL if no publication date found
+                        CHECK (date_source IN ('listing_card', 'detail_page')),
 
     -- URLs
-    detail_url          TEXT,
+    detail_url          TEXT NOT NULL,          -- traceability: every row links back to its source
 
     -- Industrial filter
     is_industrial       BOOLEAN NOT NULL DEFAULT FALSE,
@@ -320,7 +335,9 @@ CREATE TABLE iris_staging.signal_ingest (
 
     -- Geometry
     geometry            GEOMETRY(Point, 25832),
-    geocode_status      TEXT,                   -- 'resolved_district_centroid' | 'unresolved' | 'rejected_out_of_bounds'
+    geocode_status      TEXT NOT NULL
+                        CHECK (geocode_status IN
+                               ('resolved_district_centroid', 'unresolved', 'rejected_out_of_bounds')),
     geocode_reason      TEXT,                   -- e.g. 'district: Nordost / Schoenefeld-Ost' or rejection reason
 
     -- Data quality
@@ -334,7 +351,12 @@ CREATE TABLE iris_staging.signal_ingest (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT uq_source_record UNIQUE (source, source_record_id)
+    -- Named: ON CONFLICT and the tests refer to it
+    CONSTRAINT uq_source_record UNIQUE (source, source_record_id),
+    -- A point exists exactly when the location was resolved: the database itself refuses a
+    -- point without a resolved status, or a resolved status without a point
+    CONSTRAINT ck_geometry_matches_status
+        CHECK ((geocode_status = 'resolved_district_centroid') = (geometry IS NOT NULL))
 );
 
 CREATE INDEX idx_signal_ingest_city ON iris_staging.signal_ingest (city);
@@ -359,7 +381,7 @@ dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
 
 ```sql
 INSERT INTO iris_staging.signal_ingest (
-    source, source_record_id, content_hash, listing_hash, ingest_run_id, last_seen_run_id,
+    source, source_record_id, content_hash, ingest_run_id, last_seen_run_id,
     city, plan_type, plan_number, title, description,
     status, procedure_step, district, thema,
     participation_start, participation_end, publication_date, date_source,
@@ -367,10 +389,14 @@ INSERT INTO iris_staging.signal_ingest (
     geometry, geocode_status, geocode_reason, quality_flags,
     raw_data, first_seen_at, last_seen_at
 )
-VALUES (...)
+VALUES (
+    ...,
+    -- Geometry is built in SQL from the transformed coordinates; NULL x/y gives NULL
+    ST_SetSRID(ST_MakePoint(:x_25832, :y_25832), 25832),
+    ...
+)
 ON CONFLICT (source, source_record_id) DO UPDATE SET
     content_hash        = EXCLUDED.content_hash,
-    listing_hash        = EXCLUDED.listing_hash,
     ingest_run_id       = EXCLUDED.ingest_run_id,
     city                = EXCLUDED.city,
     plan_type           = EXCLUDED.plan_type,
@@ -416,8 +442,16 @@ WHERE source = :source AND source_record_id = ANY(:batch_ids);
 `xmax = 0` is the standard PostgreSQL test for whether a row from an `ON CONFLICT` upsert
 was newly inserted. It's covered by a test.
 
+**How it's executed:** the statement is a SQLAlchemy `text()` with named parameters, run
+with one parameter dict per record (no ORM models; see Phase 1). psycopg 3 adapts Python
+lists to `TEXT[]`. Dicts for `JSONB` must be wrapped in `psycopg.types.json.Jsonb(...)`, or
+binding fails. Records are executed one statement each, in a loop inside the batch's single
+transaction, collecting each `RETURNING` row. That's simple, keeps the per-record counting
+obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one
+`executemany` call isn't something to rely on with `text()`.
+
 **What `content_hash` covers:** a SHA-256 over a canonical JSON of **every persisted output
-column** except the audit and run columns (`id`, the hashes, the run IDs, `first_seen_at`,
+column** except the audit and run columns (`id`, the hash itself, the run IDs, `first_seen_at`,
 `last_seen_at`, `created_at`, `updated_at`, `raw_data`). That includes the derived fields:
 `is_industrial`, `matched_keywords`, `match_reason`, `geometry` (as rounded WKT),
 `geocode_status`, `geocode_reason` and `quality_flags`. So a change to the keyword config or
@@ -565,8 +599,7 @@ This is documented in the README and the centroid CSV provenance notes.
 5. If paginator exists, click the "next" button (`a` in paginator with `ui-paginator-next`),
    wait for content update, repeat. Playwright handles the PrimeFaces AJAX/ViewState
    transparently.
-6. For each card, navigate to the detail page to scrape description and documents. In
-   incremental mode this is skipped when the card is unchanged (see Incremental Retrieval).
+6. For each card, navigate to the detail page to scrape description and documents.
 7. Between page loads: `page.wait_for_timeout(config.request_delay_seconds * 1000)`.
 
 **Source record ID:** Numeric ID extracted from the detail URL path.
@@ -588,8 +621,7 @@ an empty list (not an exception). Log a warning. The `ingest_run` records 0 scra
    - Project ID: from `tr` id attribute (e.g., `project-1751` -> `1751`)
 4. Paginate via `page.goto` with `?tx_lepurpose[filter][page]=N` (N = 2, 3, ...) until
    no more rows appear.
-5. For each row, navigate to detail page for description and document links. In
-   incremental mode this is skipped when the row is unchanged (see Incremental Retrieval).
+5. For each row, navigate to detail page for description and document links.
 6. Polite delay between requests.
 
 **Source record ID:** Project ID from the table row (e.g., `1751`).
@@ -674,26 +706,6 @@ The brief requires dates to be verified, not assumed, so:
 
 ---
 
-## Incremental Retrieval
-
-A full run opens every detail page, about 37 minutes at a 2s delay. Incremental mode (the
-default, `scraping.incremental: true`) cuts this down:
-
-1. Listing pages are always fetched in full; they are cheap and they reveal new, removed and
-   changed rows.
-2. For each listing row, `listing_hash` is computed from the listing-level fields only.
-3. If a stored row has the same `(source, source_record_id)` and `listing_hash`, the detail
-   page is **skipped**. Its detail fields are reused from the stored row, and the record goes
-   through the normal upsert (usually counted `unchanged`). `last_seen_at` is still bumped.
-4. New rows and rows with a changed `listing_hash` get their detail page fetched as normal.
-
-**Limitation:** changes that show only on a detail page (e.g. a new document) are missed until
-the next full run. `--full` forces every detail page; the README recommends a weekly full run.
-Config changes (keywords, centroids) still propagate in incremental mode, because the derived
-fields and `content_hash` are recomputed from the reused detail fields.
-
----
-
 ## Source Overlap Documentation
 
 The same Leipzig Bauleitplan may appear in both the Saxon state portal and the Leipzig
@@ -713,9 +725,9 @@ accidental merging.
 
 ### Overview
 
-Set up the Python project, Docker environment, Alembic migrations, and core ORM models.
-This phase produces a working `docker compose up` + `alembic upgrade head` that creates
-the full schema.
+Set up the Python project, Docker environment, config and the Alembic migration (plain SQL
+DDL, no ORM models). This phase produces a working `docker compose up` +
+`alembic upgrade head` that creates the full schema.
 
 ### Changes Required
 
@@ -730,7 +742,6 @@ dependencies = [
     "playwright>=1.48",
     "beautifulsoup4>=4.12",
     "sqlalchemy>=2.0",
-    "geoalchemy2[shapely]>=0.15",   # shapely: geometry <-> Python objects
     "alembic>=1.13",
     "psycopg[binary]>=3.1",
     "pydantic>=2.5",
@@ -758,7 +769,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-# SQLAlchemy 2.0 typing works natively via Mapped[]; the old sqlalchemy.ext.mypy plugin is deprecated
+# No sqlalchemy mypy plugin: it's deprecated, and there are no ORM models to type anyway
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
@@ -870,22 +881,26 @@ it as `***`, and the engine is built with `hide_parameters=True`.
   the top of the script offline).
 - `alembic.ini` post-write hooks run `ruff check --fix` and `ruff format` on every generated
   revision. Generate with `--rev-id 001` etc. so file names follow `001_<slug>.py`.
-- `migrations/env.py` -- standard Alembic env with SQLAlchemy metadata from `schema.py`.
-- `migrations/versions/001_create_schema_and_tables.py`:
+- `target_metadata = None`: there are no ORM models, so no autogenerate (and no GeoAlchemy2
+  helpers or schema filters that autogenerate would need).
+- `migrations/versions/001_create_schema_and_tables.py`, created with
+  `alembic revision --rev-id 001 -m "create schema and tables"` and written **by hand as
+  plain SQL**, copied from **Database Schema**. This DDL is the single source of truth for the
+  schema.
+  - **One `op.execute()` per statement**, not one string with several `;`-separated
+    statements, so an error points at the right statement. `'{}'::text[]`-style casts are
+    fine: `text()` treats `:name` as a parameter but recognises `::`.
   - `CREATE EXTENSION IF NOT EXISTS postgis`
-  - `CREATE SCHEMA IF NOT EXISTS iris_staging`
-  - Create `iris_staging.ingest_run` table
-  - Create `iris_staging.signal_ingest` table with all columns, indexes, and constraints
+  - `CREATE SCHEMA IF NOT EXISTS iris_staging` (already created by `env.py`; kept so the
+    migration's own SQL is complete when read on its own)
+  - Create `iris_staging.ingest_run`, then `iris_staging.signal_ingest` (it references
+    `ingest_run`), with all columns, CHECK constraints and indexes
   - `downgrade()` drops **only the two tables**. It keeps the `postgis` extension, which other
     schemas in a shared database may depend on, and the `iris_staging` schema, which holds
     Alembic's version table and may hold other pipelines' tables. Same rule for both: a
     migration only removes what it alone owns.
 
-#### 5. `src/harvester/db/schema.py`
-
-GeoAlchemy2 ORM models for `signal_ingest` and `ingest_run`, matching the SQL above.
-
-#### 6. `src/harvester/config.py`
+#### 5. `src/harvester/config.py`
 
 - **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`,
   `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or
@@ -902,13 +917,17 @@ GeoAlchemy2 ORM models for `signal_ingest` and `ingest_run`, matching the SQL ab
       `10_postgis.sh` and `20_create_test_db.sql` ran
 - [ ] `alembic upgrade head` creates schema and tables without errors
 - [ ] `alembic downgrade base` + `alembic upgrade head` is idempotent
-- [ ] `ruff check src/` passes
-- [ ] `mypy src/harvester/db/ src/harvester/config.py` passes
+- [ ] `alembic upgrade head --sql` prints the full DDL without a database or `.env`
+- [ ] `ruff check .` passes
+- [ ] `mypy src/harvester/config.py` passes
 
 #### Manual Verification
 - [ ] `psql` shows `iris_staging.signal_ingest` and `iris_staging.ingest_run` tables
 - [ ] `SELECT PostGIS_Version();` returns `3.4`
 - [ ] Geometry column has SRID 25832
+- [ ] The constraints bite: an insert with `geocode_status = 'resolved_district_centroid'`
+      and a NULL geometry fails with `ck_geometry_matches_status`, and an unknown
+      `geocode_status` value fails its CHECK
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 2.
 
@@ -957,12 +976,8 @@ class ScrapeResult:
 
 class BaseAdapter(ABC):
     @abstractmethod
-    def scrape(self, page: Page, known_listing_hashes: dict[str, str]) -> ScrapeResult:
-        """Scrape all records from this source. Handles pagination internally.
-
-        known_listing_hashes maps source_record_id -> stored listing_hash, so
-        incremental mode can skip unchanged detail pages.
-        """
+    def scrape(self, page: Page) -> ScrapeResult:
+        """Scrape all records from this source. Handles pagination internally."""
 ```
 
 #### 3. `src/harvester/adapters/sachsen_portal.py`
@@ -1035,9 +1050,6 @@ def test_extracts_plan_number():
 
 def test_handles_malformed_card(page):
     """Card without ID -> ScrapeError in result.errors; other cards still parsed."""
-
-def test_incremental_skips_unchanged_detail(page):
-    """Known listing_hash -> detail route never requested."""
 ```
 
 #### 8. `tests/test_leipzig_adapter.py`
@@ -1098,7 +1110,6 @@ Implement the normalisation pipeline that transforms `ScrapedRecord` into
 - Plan number extraction: regex for "Nr. XXXX" patterns.
 - Quality flags: `missing_publication_date`, `missing_district`, `unparseable_date`,
   `detail_page_failed`.
-- `listing_hash`: SHA-256 of the listing-level fields only.
 - `content_hash`: SHA-256 of the canonical JSON of every persisted output field, including
   derived ones (filter result, geometry WKT, geocode status, quality flags). See
   **Upsert Logic**. It is computed **after** filter and geocode, as the last pipeline step.
@@ -1184,14 +1195,14 @@ and integration tests including idempotent re-run and duplicate detection.
 
 #### 1. `src/harvester/db/upsert.py`
 
-- `upsert_records(session, records: list[NormalisedRecord], run: IngestRun) -> UpsertStats`
+- `upsert_records(conn: Connection, records: list[NormalisedRecord], run: IngestRun) -> UpsertStats`,
+  using `text()` statements on a SQLAlchemy Core connection (no ORM session)
 - Implements **Upsert Logic** exactly, in one transaction per batch:
   - de-duplicate the batch, logging dropped duplicates as `duplicate_in_batch`
   - step 1: `INSERT ... ON CONFLICT ... WHERE content_hash IS DISTINCT FROM ... RETURNING (xmax = 0)`
   - step 2: `UPDATE last_seen_at, last_seen_run_id` for every key in the batch
 - Returns `UpsertStats(inserted, updated, unchanged, duplicates_in_batch)`, derived from
   `RETURNING` as described there.
-- `load_listing_hashes(session, source) -> dict[str, str]` feeds incremental mode.
 
 #### 2. `src/harvester/cli.py` (+ `__main__.py`)
 
@@ -1203,8 +1214,7 @@ def cli(): ...
 @click.option("--dry-run", is_flag=True, help="Print records without writing to DB")
 @click.option("--source", type=str, help="Run only this source")
 @click.option("--city", type=str, help="Run only this city")
-@click.option("--full", is_flag=True, help="Ignore listing_hash; fetch every detail page")
-def run(dry_run: bool, source: str | None, city: str | None, full: bool) -> None: ...
+def run(dry_run: bool, source: str | None, city: str | None) -> None: ...
 
 @cli.command()
 def report(): ...
@@ -1463,9 +1473,9 @@ filter evidence for spotting false positives.
   - Leipzig city portal: ~555 records on 12 listing pages
   - Dresden and Leipzig state portal: ~250 records on ~25 listing pages
 
-  A `--full` run is ~840 page loads (~37 listing + ~800 detail), about 30 minutes at a 2s
-  delay. An incremental run fetches listing pages plus only new or changed detail pages,
-  usually a few minutes.
+  A live run is ~840 page loads (~37 listing + ~800 detail), about 30 minutes at a 2s
+  delay. Every run fetches every detail page (no incremental mode; see "What We Are NOT
+  Doing"). Re-run and idempotency demos use the saved fixtures and take seconds.
 - **Database:** Small table (<1000 rows). No partitioning or special indexing needed beyond
   the defined indexes.
 - **Memory:** HTML pages are small (<100KB each). No memory concerns.

@@ -12,12 +12,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Step 2 points this at harvester.db.schema's Base.metadata for autogenerate support
+# No ORM models: migrations are hand-written SQL, so there is nothing to autogenerate from
 target_metadata = None
 
 # Everything this project owns lives in one schema, including Alembic's own version table.
 # In a shared database, a default public.alembic_version would collide with any other
-# Alembic-managed project. Step 2 moves this constant next to the ORM models.
+# Alembic-managed project.
 STAGING_SCHEMA = "iris_staging"
 VERSION_TABLE_SCHEMA = STAGING_SCHEMA
 
