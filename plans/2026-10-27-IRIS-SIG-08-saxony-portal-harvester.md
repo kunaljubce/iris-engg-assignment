@@ -195,7 +195,7 @@ iris-engg-assignment/
         upsert.py                   # INSERT ... ON CONFLICT (source, source_record_id)
       adapters/
         __init__.py
-        base.py                     # BaseAdapter ABC, ScrapeResult, ScrapeError
+        base.py                     # ScrapeResult, ScrapeError (no adapter class hierarchy)
         fetch.py                    # fetch(): httpx GET with retries, status checks, polite delay
         sachsen_portal.py           # state portal: marker JSON + detail page (Dresden + Leipzig)
         leipzig_stadtportal.py      # city portal: table rows, "im Verfahren" only
@@ -1003,10 +1003,7 @@ fields that map to the DB schema.
 #### 2. `src/harvester/adapters/base.py` ✅
 
 ```python
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-
-import httpx
 
 from harvester.models import ScrapedRecord
 
@@ -1023,23 +1020,35 @@ class ScrapeError:
 class ScrapeResult:
     records: list[ScrapedRecord] = field(default_factory=list)
     errors: list[ScrapeError] = field(default_factory=list)
-
-
-class BaseAdapter(ABC):
-    @abstractmethod
-    def scrape(self, client: httpx.Client) -> ScrapeResult:
-        """Scrape all listing records from this source. Handles pagination internally."""
 ```
 
-#### 3. `src/harvester/adapters/fetch.py`
+**No adapter base class.** Each adapter is a module with a function of the same signature,
+`scrape(client, source, settings) -> ScrapeResult`. The CLI picks it by the source's `type`
+from `settings.yml`:
+
+```python
+SCRAPERS = {"sachsen": sachsen_portal.scrape, "leipzig_stadt": leipzig_stadtportal.scrape}
+result = SCRAPERS[source.type](client, source, config.scraping)
+```
+
+#### 3. `src/harvester/adapters/fetch.py` ✅
 
 `fetch(client, url, settings) -> str` with the retry and status rules from **Resilience**. It
-applies the polite delay before every request and raises `FetchError(kind, url, status)` when
-retries run out or on a non-retryable 4xx; adapters turn that into a `ScrapeError`.
+raises `FetchError(kind, url, status, message)` when retries run out or on a non-retryable
+4xx; adapters turn that into a `ScrapeError`.
+
+- `max_retries: 3` = 3 retries **after** the first attempt (at most 4 requests).
+- Waits: `request_delay_seconds` before the first attempt; `retry_backoff_factor ** n` before
+  retry n (2, 4, 8 s). A 429's `Retry-After` in seconds replaces that wait; the HTTP-date form
+  falls back to the backoff.
+- `make_client(settings, transport=None)` builds the one `httpx.Client` (user agent,
+  `timeout_seconds`, `follow_redirects=True`). The CLI and the test `mock_client` both use it,
+  passing a `MockTransport` in tests.
 
 #### 4. `src/harvester/adapters/sachsen_portal.py`
 
-- `SachsenPortalAdapter(BaseAdapter)` with `city` and `status` parameters.
+- `scrape(client, source: SachsenSource, settings) -> ScrapeResult`: one listing request per
+  city and status from the config, results merged.
 - `parse_markers(html) -> tuple[list[ScrapedRecord], list[ScrapeError]]`
 - `parse_expected_count(html) -> int | None`
 - `parse_detail(html) -> str | None`: the raw "Zeitraum ..." text.
@@ -1047,7 +1056,8 @@ retries run out or on a non-retryable 4xx; adapters turn that into a `ScrapeErro
 
 #### 5. `src/harvester/adapters/leipzig_stadtportal.py`
 
-- `LeipzigStadtAdapter(BaseAdapter)`.
+- `scrape(client, source: LeipzigStadtSource, settings) -> ScrapeResult`: follows the next-page
+  button until there is none.
 - `parse_rows(html) -> tuple[list[ScrapedRecord], list[ScrapeError]]`
 - `parse_next_page(html) -> int | None`
 
@@ -1074,7 +1084,7 @@ the live markup in `SOURCES.md`), and HTTP errors via `MockTransport`.
 #### 7. `tests/conftest.py`
 
 - `load_fixture(name) -> str`
-- `mock_client(routes: dict[str, str | int])`: an `httpx.Client` on `httpx.MockTransport`
+- `mock_client(routes: dict[str, str | int])`: `make_client()` with an `httpx.MockTransport`
   that serves fixture text (or a status code) per URL and **fails the test on any unrouted
   URL**, so tests can never reach the live portals. No extra dependency (MockTransport is part
   of httpx).
@@ -1118,7 +1128,7 @@ def test_follows_next_page():
     """Snippet page 1 with data-next=2, then the fixture (no button) as page 2: both fetched, then stop."""
 ```
 
-#### 10. `tests/test_fetch.py`
+#### 10. `tests/test_fetch.py` ✅
 
 ```python
 def test_retries_on_503_then_succeeds(): ...
@@ -1167,12 +1177,36 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
   afterwards.
 - **Why is `ScrapeError.kind` a plain `str`?** No database CHECK constrains it, unlike
   `geocode_status`; the allowed values are listed in a comment.
+- **Why no `BaseAdapter` class?** Two fixed sources, both set by the brief. An abstract base
+  pays off when implementations are swapped or added often; here it would only enforce one
+  method name. Two module functions with the same signature, picked from a dict by the
+  source's `type`, do the same with less code. (An ABC is in "Nice to Have" for a third source.)
 - **Why does `scrape()` take the `httpx.Client` as a parameter?** So tests can pass a client
   backed by `MockTransport`. The adapter never creates its own client.
 - **Why return errors instead of raising?** One bad marker or row must not stop the run; bad
   entries are collected next to the good ones ("errors are visible").
 - **Why `SNIPPET_MAX_CHARS = 2048`?** Enough to see what was wrong with an entry without
   bloating `ingest_run.errors`; one constant instead of each adapter repeating 2048.
+- **Why one `fetch()` function for both portals?** Both need the same retry, 429 and delay
+  rules; written once, tested once (`tests/test_fetch.py`).
+- **Why no retry library (tenacity) or httpx's `retries=`?** httpx's built-in retries cover
+  connection failures only, not 5xx or 429. tenacity would be a dependency to replace a short
+  loop that can be explained line by line.
+- **Which errors are retried?** Network errors and timeouts, 5xx and 429 can go away on their
+  own. Any other 4xx (404, 403) won't, so it fails at once and is recorded.
+- **What does `max_retries: 3` mean?** 3 retries after the first try, so at most 4 requests per
+  URL, waiting 2, 4, 8 s between them: about 14 s worst case per URL.
+- **Why honour only the seconds form of `Retry-After`?** Neither portal has sent a 429 at all;
+  parsing the date form would be code for a case never seen. It falls back to the backoff.
+- **Why does a retry wait only the backoff, not backoff plus polite delay?** The backoff is
+  already at least as long; adding both makes the waits harder to reason about and test.
+- **Why `follow_redirects=True`?** The state portal redirects a wrong-city detail URL to the
+  listing page; following it lets `parse_detail` find no "Zeitraum" and flag the row, instead
+  of failing on a 302.
+- **Why `make_client()`?** One place sets the user agent, timeout and redirects. Tests build
+  their client with it too (passing a `MockTransport`), so they run with production settings.
+- **How do the tests avoid real sleeps?** They replace `time.sleep` in `fetch.py` with a list
+  recorder: tests run instantly and can assert the exact waits (e.g. `Retry-After: 5` -> 5 s).
 
 ### Success Criteria
 
@@ -1634,6 +1668,8 @@ Not required for acceptance. Pick up only once Phases 1-5 are done.
   (delay >= 0, `retry_backoff_factor` >= 1, timeout > 0, lat/lon within -90..90 / -180..180),
   non-empty `sources` / `cities` / `status_filters`, and a discriminated union on the source
   `type` for clearer error messages.
+- **Adapter base class (`BaseAdapter` ABC).** Worth it once a third source is added; with two
+  fixed sources, module functions with the same `scrape()` signature are enough.
 
 ---
 

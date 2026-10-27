@@ -1,13 +1,13 @@
 """What every source adapter returns.
 
+There is no adapter base class: each adapter module has a `scrape()` function with the same
+signature, and the CLI picks one by the source's `type`.
+
 Plain dataclasses, not pydantic: these are built by our own code, so there is nothing to
 validate. A bad record never stops the run; it becomes a ScrapeError next to the good ones.
 """
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-
-import httpx
 
 from harvester.models import ScrapedRecord
 
@@ -29,9 +29,3 @@ class ScrapeError:
 class ScrapeResult:
     records: list[ScrapedRecord] = field(default_factory=list)
     errors: list[ScrapeError] = field(default_factory=list)
-
-
-class BaseAdapter(ABC):
-    @abstractmethod
-    def scrape(self, client: httpx.Client) -> ScrapeResult:
-        """Scrape all listing records from this source. Handles pagination internally."""
