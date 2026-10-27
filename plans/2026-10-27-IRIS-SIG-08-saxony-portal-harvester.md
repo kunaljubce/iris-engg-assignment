@@ -613,7 +613,9 @@ in `records_rejected`); the others are still parsed.
 ### Common: ScrapedRecord Model
 
 ```python
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 class ScrapedRecord(BaseModel):
     source: str                     # 'sachsen_portal' | 'leipzig_stadtportal'
@@ -625,8 +627,8 @@ class ScrapedRecord(BaseModel):
     lon: float | str | None = None  # as given by the source; checked in the pipeline
     lat: float | str | None = None
     zeitraum: str | None = None     # raw "Zeitraum ..." text from the detail page
-    thema: list[str] = []           # filter input only (Leipzig); stored in raw_data
-    raw_data: dict                  # all scraped fields as-is
+    thema: list[str] = Field(default_factory=list)  # filter input only (Leipzig); stored in raw_data
+    raw_data: dict[str, Any]        # all scraped fields as-is
 ```
 
 ---
@@ -941,7 +943,7 @@ instances. Test with saved HTML fixtures (no live network).
 
 ### Changes Required
 
-#### 0. Follow-ups from the captures
+#### 0. Follow-ups from the captures ✅
 
 - `pyproject.toml`: `uv remove playwright pyproj && uv add httpx` (see Phase 1 step 1).
 - `config/settings.yml` + `config.py`: drop `headless` / `page_timeout_ms`, add
@@ -952,7 +954,7 @@ instances. Test with saved HTML fixtures (no live network).
   `alembic downgrade base && alembic upgrade head`.
 - README: remove the `playwright install chromium` step.
 
-#### 1. `src/harvester/models.py`
+#### 1. `src/harvester/models.py` ✅
 
 Pydantic `ScrapedRecord` model (as specified above). Also `NormalisedRecord` with all
 fields that map to the DB schema.
