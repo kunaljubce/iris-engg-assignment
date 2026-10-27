@@ -1,0 +1,55 @@
+sources:
+  - name: sachsen_portal
+    type: sachsen
+    base_url: "https://buergerbeteiligung.sachsen.de"
+    cities:
+      - slug: dresden
+        label: "Landeshauptstadt Dresden"
+      - slug: leipzig
+        label: "Stadt Leipzig"
+    format_filter: "Bauleitplan"
+    # One scrape pass per status; BEENDETE is needed for historical plans
+    status_filters: ["AKTUELLE", "BEENDETE"]
+
+  - name: leipzig_stadtportal
+    type: leipzig_stadt
+    base_url: "https://www.leipzig.de"
+    listing_path: "/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene"
+
+scraping:
+  headless: true
+  request_delay_seconds: 2.0
+  max_retries: 3
+  retry_backoff_factor: 2.0
+  # Override via HARVESTER_USER_AGENT env var to add an operator contact address
+  user_agent: "IRIS-SIG-08-Harvester/1.0 (bot)"
+  page_timeout_ms: 30000
+
+industrial_filter:
+  # Case-insensitive match anywhere inside a word, so German compounds hit
+  # (Gewerbestandort, Kleingewerbe, Logistikzentrum)
+  keywords:
+    - "Gewerbegebiet"
+    - "Industriegebiet"
+    - "Gewerbe"
+    - "Industrie"
+    - "Logistik"
+    - "Gewerbepark"
+    - "Industriepark"
+    - "Technologiepark"
+    - "Gueterverkehrszentrum"
+    - "Güterverkehrszentrum"
+    - "Produktion"
+  # Case-SENSITIVE whole-token match: short codes would hit ordinary words inside compounds
+  case_sensitive_tokens:
+    - "GE"
+    - "GI"
+    - "GVZ"
+  # Leipzig Thema field direct match
+  thema_signals:
+    - "Gewerbe"
+
+bounding_boxes:
+  # WGS84 [min_lon, min_lat, max_lon, max_lat]
+  dresden: [13.55, 50.95, 13.95, 51.18]
+  leipzig: [12.20, 51.25, 12.55, 51.45]

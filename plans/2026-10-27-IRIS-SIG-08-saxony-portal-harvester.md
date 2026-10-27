@@ -143,7 +143,7 @@ iris-engg-assignment/
       20_create_test_db.sql         # creates iris_test database + postgis extension
   .env.example                      # placeholders only (no secrets committed)
   config/
-    settings.yaml                   # city/source list, keyword list, bounding boxes
+    settings.yml                   # city/source list, keyword list, bounding boxes
   data/
     district_centroids.csv          # checked-in centroid lookup (WGS84, with provenance)
   migrations/
@@ -155,7 +155,7 @@ iris-engg-assignment/
       __init__.py
       __main__.py                   # `python -m harvester`: calls cli.main()
       cli.py                        # click CLI; `harvester` console script (pyproject)
-      config.py                     # pydantic-settings: POSTGRES_* -> DB URL; settings.yaml
+      config.py                     # pydantic-settings: POSTGRES_* -> DB URL; settings.yml
       models.py                     # ScrapedRecord, IngestRun, NormalisedRecord
       db/
         __init__.py
@@ -213,7 +213,7 @@ iris-engg-assignment/
 
 ---
 
-## Configuration (settings.yaml)
+## Configuration (settings.yml)
 
 ```yaml
 sources:
@@ -228,13 +228,11 @@ sources:
     format_filter: "Bauleitplan"
     # One scrape pass per status; BEENDETE is needed for historical plans
     status_filters: ["AKTUELLE", "BEENDETE"]
-    rows_per_page: 10
 
   - name: leipzig_stadtportal
     type: leipzig_stadt
     base_url: "https://www.leipzig.de"
     listing_path: "/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene"
-    rows_per_page: 50
 
 scraping:
   headless: true
@@ -534,7 +532,7 @@ Provenance column documents the source and date for each centroid. All coordinat
 WGS84 (EPSG:4326); the pipeline converts to EPSG:25832 via pyproj at load time.
 
 **Bounding box rejection:** Centroids are checked in WGS84 against the per-city bounding
-box (from `settings.yaml`) **before** being transformed to EPSG:25832. Any point outside
+box (from `settings.yml`) **before** being transformed to EPSG:25832. Any point outside
 is rejected with `geocode_status = 'rejected_out_of_bounds'` and a `geocode_reason`
 explaining the violation. These rows are stored with `geometry = NULL`, never with the
 bad point. Non-finite or swapped lat/lon values (e.g. lat 13.7, lon 51.0) fail the same
@@ -692,7 +690,7 @@ accidental merging.
 
 ---
 
-## Phase 1: Project Skeleton and Database
+## Phase 1: Project Skeleton and Database ✅
 
 ### Overview
 
@@ -871,14 +869,23 @@ it as `***`, and the engine is built with `hide_parameters=True`.
     Alembic's version table and may hold other pipelines' tables. Same rule for both: a
     migration only removes what it alone owns.
 
-#### 5. `src/harvester/config.py`
+#### 5. `src/harvester/config.py` ✅
 
 - **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`,
   `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or
   `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by
   `tests/test_config.py`: a password with special characters survives the URL round trip, the
   password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
-- **To do:** the model that loads `config/settings.yaml` (sources, keywords, bounding boxes).
+- **Done:** `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with
+  pydantic models, one per section. `extra="forbid"` everywhere, so a misspelt key fails at
+  startup instead of silently falling back to a default. Sources are a discriminated union on
+  `type` (`sachsen` | `leipzig_stadt`). Checks that catch real config mistakes: no blank
+  keywords (an empty one would match every title), bounding boxes with exactly 4 values and
+  min below max, and a bounding box for every city a source covers. `HARVESTER_USER_AGENT`
+  (environment or `.env`) overrides `scraping.user_agent`. `config.model_dump(mode="json")` is
+  what goes into `ingest_run.config_snapshot`. Covered by `tests/test_config.py`.
+- `rows_per_page` is not in the config: page sizes are a property of the portals, and both
+  adapters page until no results are left.
 
 ### Success Criteria
 
@@ -1349,7 +1356,7 @@ Full README covering:
   Note that the Chromium download is version-locked to the `playwright` pin in `uv.lock`
   and must be re-run after upgrading Playwright.
 - Quick start (`uv run harvester run`)
-- Configuration (`settings.yaml`, environment variables)
+- Configuration (`settings.yml`, environment variables)
 - Architecture overview (adapters, pipeline, DB)
 - Testing (`pytest`)
 - Validation (`psql -f sql/validation_queries.sql`)
