@@ -569,20 +569,25 @@ through `fetch()` for every request (see **Resilience**). Parsing is split into 
 Runs once per city in `cities` and status in `status_filters`:
 
 1. GET `{base_url}/portal/{city}/beteiligung/themen?format={format_filter}&status={status}`.
-2. `parse_markers(html)`: find `map.drawMarkers(` followed by a JSON array, and `json.loads` it.
-   For each entry:
+2. `parse_listing(html, page_url, city)`: find `map.drawMarkers([` (the page also calls
+   `drawMarkers(markerData)`) and decode the array with `json.JSONDecoder().raw_decode`, which
+   stops at the end of the array. For each entry:
    - `id` -> `source_record_id` (as a string)
    - `kategorie` -> `title` (`html.unescape`, since the portal escapes quotes as `&quot;`)
-   - `href` -> `detail_url` (joined to `base_url`; the city in the path matters, Key Discovery 6)
+   - `href` -> `detail_url` (joined to the listing URL; the city in the path matters, Key
+     Discovery 6). Missing `href`: built from the listing's city and the `id`
    - `latitude` / `longitude` -> kept as given; checked in the pipeline
    - `adresse` -> `location_text`
-   - the whole entry -> `raw_data`
-3. `parse_expected_count(html)`: "von N" from `span.ui-paginator-current` when present (more
-   than 10 results), else the number of `div.nbp-teaser` cards. If it differs from the marker
-   count, a `count_mismatch` error goes to `ingest_run.errors`; the markers are still used.
+   - `raw_data` = `{"marker": <entry as given>, "listing_url": <page URL>}`
+3. `parse_expected_count(html) -> int`: "von N" from `span.ui-paginator-current` when present
+   (more than 10 results), else the number of `div.nbp-teaser` cards. `parse_listing` compares
+   it with the marker count; a difference is a `count_mismatch` error in `ingest_run.errors`,
+   and the markers are still used.
 4. The pipeline filters on title. For each **match only**, GET the detail page and
-   `parse_detail(html)` reads `li.nbp-statistik--laufzeit` ("Zeitraum DD.MM.YYYY bis
-   DD.MM.YYYY"). The raw text goes into `raw_data`; the start date becomes
+   `parse_detail(html, record_id)` reads `li.nbp-statistik--laufzeit` ("Zeitraum DD.MM.YYYY bis
+   DD.MM.YYYY"), **only if** the `<body>` has class `nbp-beteiligung-{id}`: listing cards carry
+   the same `li`, so a redirect to a listing would otherwise yield another procedure's dates
+   (found while testing on 2026-10-28). The raw text goes into `raw_data`; the start date becomes
    `publication_date` (see **Publication Dates**). A detail page that fails keeps the listing
    data and gets `detail_page_failed`.
 
@@ -644,7 +649,8 @@ class ScrapedRecord(BaseModel):
   Any other `4xx` is not retried. It is recorded as a page-level error (e.g. a detail page
   that 404s gets `quality_flags = ['detail_page_failed']` and keeps its listing data).
 - **Redirects:** followed. A detail URL that ends up on a listing page (Key Discovery 6) is
-  caught because `parse_detail` finds no "Zeitraum" there, flagged `missing_publication_date`.
+  caught because that page's `<body>` lacks the record's `nbp-beteiligung-{id}` class, so
+  `parse_detail` returns None and the row is flagged `missing_publication_date`.
 - **Polite delay:** `request_delay_seconds` (default 2s) before every request.
 - **User agent:** Neutral identifying string (`IRIS-SIG-08-Harvester/1.0 (bot)`), overridable
   via the `HARVESTER_USER_AGENT` env var so an operator can add a contact address without
@@ -1045,14 +1051,18 @@ raises `FetchError(kind, url, status, message)` when retries run out or on a non
   `timeout_seconds`, `follow_redirects=True`). The CLI and the test `mock_client` both use it,
   passing a `MockTransport` in tests.
 
-#### 4. `src/harvester/adapters/sachsen_portal.py`
+#### 4. `src/harvester/adapters/sachsen_portal.py` ✅
 
 - `scrape(client, source: SachsenSource, settings) -> ScrapeResult`: one listing request per
-  city and status from the config, results merged.
-- `parse_markers(html) -> tuple[list[ScrapedRecord], list[ScrapeError]]`
-- `parse_expected_count(html) -> int | None`
-- `parse_detail(html) -> str | None`: the raw "Zeitraum ..." text.
-- `fetch_detail(client, record) -> ScrapedRecord`: used by the pipeline for matches only.
+  city and status from the config, results merged. A listing that fails to fetch becomes a
+  `ScrapeError` (`http_4xx` / `retries_exhausted`); the other listings still run.
+- `parse_listing(html, page_url, city) -> tuple[list[ScrapedRecord], list[ScrapeError]]`:
+  markers plus the count check.
+- `parse_expected_count(html) -> int`
+- `parse_detail(html, record_id) -> str | None`: the raw "Zeitraum ..." text, only from the
+  record's own detail page.
+- `fetch_detail(client, record, settings) -> ScrapedRecord`: used by the pipeline for matches
+  only. It lets `FetchError` through; the pipeline turns it into `detail_page_failed`.
 
 #### 5. `src/harvester/adapters/leipzig_stadtportal.py`
 
@@ -1081,29 +1091,40 @@ Inline snippets: empty listing, cards without marker JSON, marker without `id`, 
 / non-numeric coordinates, "von 52" against 51 markers, the next-page button (copied from
 the live markup in `SOURCES.md`), and HTTP errors via `MockTransport`.
 
-#### 7. `tests/conftest.py`
+#### 7. `tests/conftest.py` ✅ (DB fixtures follow in Phase 4)
 
+- `tests/__init__.py` makes `tests` a package, so test modules import `load_fixture` and
+  `MockClient` from `tests.conftest` and mypy sees one module, not two
 - `load_fixture(name) -> str`
 - `mock_client(routes: dict[str, str | int])`: `make_client()` with an `httpx.MockTransport`
   that serves fixture text (or a status code) per URL and **fails the test on any unrouted
   URL**, so tests can never reach the live portals. No extra dependency (MockTransport is part
   of httpx).
-- The polite delay is patched to 0.
+- `scraping_config` fixture: no polite delay and no retries, so adapter tests run instantly.
 
-#### 8. `tests/test_sachsen_adapter.py`
+#### 8. `tests/test_sachsen_adapter.py` ✅
 
 ```python
 def test_parses_markers():
-    """id, unescaped title, city-correct detail_url, lon/lat, address from the fixture."""
+    """id, title, city-correct detail_url, lon/lat, address, raw_data from the fixture."""
 
 def test_listing_has_all_results():
     """52 markers although only 10 cards are rendered; matches 'von 52'."""
 
+def test_unescapes_title():
+    """Snippet: '&quot;Am Werk&quot;' -> '"Am Werk"'."""
+
 def test_count_mismatch_logged():
-    """Snippet: 'von 52' but 51 markers -> count_mismatch error, markers still returned."""
+    """Snippet: 'von 3' but 2 markers -> count_mismatch error, markers still returned."""
 
 def test_parses_zeitraum_from_detail():
     """'Zeitraum 12.10.2026 bis 13.11.2026' from the detail fixture."""
+
+def test_redirect_to_listing_gives_no_zeitraum():
+    """The listing fixture has Zeitraum items in its cards; they must not be taken."""
+
+def test_other_records_detail_page_gives_no_zeitraum():
+    """Detail page of 1069133 read for record 1066719 -> None."""
 
 def test_handles_empty_listing():
     """Snippet: no markers, no cards -> no records, no errors, no exception."""
@@ -1112,7 +1133,14 @@ def test_cards_without_markers_is_an_error():
     """Snippet: cards present but no marker JSON -> markers_not_found error."""
 
 def test_handles_malformed_markers():
-    """Snippet: marker without id -> ScrapeError; the others still parsed."""
+    """Snippet: marker without id, marker with blank title -> ScrapeErrors with snippet;
+    the others still parsed."""
+
+def test_scrape_reads_every_city_and_status():
+    """mock_client: one listing served, one 404 -> its records plus one http_4xx error."""
+
+def test_fetch_detail_adds_zeitraum(): ...
+def test_fetch_detail_failure_raises(): ...
 ```
 
 #### 9. `tests/test_leipzig_adapter.py`
@@ -1183,6 +1211,29 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
   source's `type`, do the same with less code. (An ABC is in "Nice to Have" for a third source.)
 - **Why does `scrape()` take the `httpx.Client` as a parameter?** So tests can pass a client
   backed by `MockTransport`. The adapter never creates its own client.
+- **Why read the marker JSON with `raw_decode` instead of a regex?** A regex like
+  `\[.*?\]\);` would stop early if a title ever contained `]);`. `raw_decode` parses exactly
+  one JSON value and stops where it ends.
+- **Why does `parse_detail` check the body class `nbp-beteiligung-{id}`?** Found in testing:
+  listing cards carry the same Zeitraum element, so a detail URL redirected to a listing
+  (HTTP 200) would have given the row another procedure's dates. Now it gets no date and is
+  flagged `missing_publication_date`: wrong data is worse than missing data.
+- **Why does the count check compare with the cards or "von N"?** The marker JSON is the data
+  source; the number the page itself shows is an independent check that no results were lost.
+  A mismatch is recorded, not fatal: the markers are still the most complete list.
+- **Why is "cards but no markers" an error, but "no cards, no markers" not?** No cards means
+  the portal has no results, which is normal. Cards without markers means the page layout
+  changed and the adapter would silently return nothing.
+- **Why keep coordinates as given and check them later?** The adapter only reads; deciding
+  what is valid (bounding box, NaN) is one rule in the pipeline for every source. Values of the
+  wrong JSON type (null, list) count as missing, with the original kept in `raw_data`.
+- **Why does `fetch_detail` let `FetchError` through?** A failed detail page isn't a scrape
+  error: the record is still usable. The pipeline keeps it and adds `detail_page_failed`.
+- **Why `source = "sachsen_portal"` as a module constant, not from the config `name`?** It is
+  the identifier stored in the database's natural key; it must not change if someone renames
+  the config entry.
+- **Why `tests/__init__.py`?** It lets test modules import helpers from `tests.conftest`
+  without mypy seeing the file under two module names.
 - **Why return errors instead of raising?** One bad marker or row must not stop the run; bad
   entries are collected next to the good ones ("errors are visible").
 - **Why `SNIPPET_MAX_CHARS = 2048`?** Enough to see what was wrong with an entry without
@@ -1201,8 +1252,8 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 - **Why does a retry wait only the backoff, not backoff plus polite delay?** The backoff is
   already at least as long; adding both makes the waits harder to reason about and test.
 - **Why `follow_redirects=True`?** The state portal redirects a wrong-city detail URL to the
-  listing page; following it lets `parse_detail` find no "Zeitraum" and flag the row, instead
-  of failing on a 302.
+  listing page; following it lets `parse_detail` see the page isn't the record's own and flag
+  the row, instead of failing on a 302.
 - **Why `make_client()`?** One place sets the user agent, timeout and redirects. Tests build
   their client with it too (passing a `MockTransport`), so they run with production settings.
 - **How do the tests avoid real sleeps?** They replace `time.sleep` in `fetch.py` with a list
