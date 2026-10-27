@@ -69,26 +69,27 @@ class DatabaseSettings(BaseSettings):
 
 # An empty keyword would match every title, so blank entries are rejected
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-HttpsUrl = Annotated[str, StringConstraints(pattern=r"^https://")]
 
 
 class _StrictModel(BaseModel):
-    # An unknown key is almost always a typo; fail instead of silently using a default
+    # A misspelt key would otherwise be ignored silently; e.g. a typo in `keywords` would
+    # leave the filter empty and the run would "succeed" with zero matches
     model_config = ConfigDict(extra="forbid")
 
 
 class City(_StrictModel):
-    slug: NonEmptyStr
-    label: NonEmptyStr
+    slug: str
+    label: str
 
 
 class SachsenSource(_StrictModel):
     type: Literal["sachsen"]
-    name: NonEmptyStr
-    base_url: HttpsUrl
-    cities: list[City] = Field(min_length=1)
-    format_filter: NonEmptyStr
-    status_filters: list[Literal["AKTUELLE", "BEENDETE"]] = Field(min_length=1)
+    name: str
+    base_url: str
+    cities: list[City]
+    format_filter: str
+    # Literal: a misspelt status would select nothing and silently skip those plans
+    status_filters: list[Literal["AKTUELLE", "BEENDETE"]]
 
     @property
     def city_slugs(self) -> list[str]:
@@ -97,9 +98,9 @@ class SachsenSource(_StrictModel):
 
 class LeipzigStadtSource(_StrictModel):
     type: Literal["leipzig_stadt"]
-    name: NonEmptyStr
-    base_url: HttpsUrl
-    listing_path: Annotated[str, StringConstraints(pattern=r"^/")]
+    name: str
+    base_url: str
+    listing_path: str
 
     @property
     def city_slugs(self) -> list[str]:
@@ -107,18 +108,13 @@ class LeipzigStadtSource(_StrictModel):
         return ["leipzig"]
 
 
-# `type` picks the model, so an error message names the fields of the right source kind
-Source = Annotated[SachsenSource | LeipzigStadtSource, Field(discriminator="type")]
-
-
 class ScrapingConfig(_StrictModel):
     headless: bool
-    request_delay_seconds: float = Field(ge=0)
-    max_retries: int = Field(ge=0)
-    # Below 1 the wait between retries would shrink instead of grow
-    retry_backoff_factor: float = Field(ge=1)
-    user_agent: NonEmptyStr
-    page_timeout_ms: int = Field(gt=0)
+    request_delay_seconds: float
+    max_retries: int
+    retry_backoff_factor: float
+    user_agent: str
+    page_timeout_ms: int
 
 
 class IndustrialFilterConfig(_StrictModel):
@@ -130,10 +126,10 @@ class IndustrialFilterConfig(_StrictModel):
 class BoundingBox(_StrictModel):
     """WGS84 box, written in YAML as [min_lon, min_lat, max_lon, max_lat]."""
 
-    min_lon: float = Field(ge=-180, le=180)
-    min_lat: float = Field(ge=-90, le=90)
-    max_lon: float = Field(ge=-180, le=180)
-    max_lat: float = Field(ge=-90, le=90)
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
 
     @model_validator(mode="before")
     @classmethod
@@ -146,20 +142,21 @@ class BoundingBox(_StrictModel):
 
     @model_validator(mode="after")
     def _min_below_max(self) -> Self:
+        # A swapped box contains no point, so every record would be rejected_out_of_bounds
         if self.min_lon >= self.max_lon or self.min_lat >= self.max_lat:
             raise ValueError("min must be below max (are lon/lat or the corners swapped?)")
         return self
 
 
 class HarvesterConfig(_StrictModel):
-    sources: list[Source] = Field(min_length=1)
+    sources: list[SachsenSource | LeipzigStadtSource]
     scraping: ScrapingConfig
     industrial_filter: IndustrialFilterConfig
     bounding_boxes: dict[str, BoundingBox]
 
     @model_validator(mode="after")
     def _every_city_has_a_bounding_box(self) -> Self:
-        # Without a box, geocoding a city's records could not reject bad coordinates
+        # Fail now rather than with a KeyError while geocoding, after the whole scrape
         cities = {slug for source in self.sources for slug in source.city_slugs}
         missing = sorted(cities - self.bounding_boxes.keys())
         if missing:

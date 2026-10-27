@@ -877,13 +877,19 @@ it as `***`, and the engine is built with `hide_parameters=True`.
   `tests/test_config.py`: a password with special characters survives the URL round trip, the
   password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
 - **Done:** `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with
-  pydantic models, one per section. `extra="forbid"` everywhere, so a misspelt key fails at
-  startup instead of silently falling back to a default. Sources are a discriminated union on
-  `type` (`sachsen` | `leipzig_stadt`). Checks that catch real config mistakes: no blank
-  keywords (an empty one would match every title), bounding boxes with exactly 4 values and
-  min below max, and a bounding box for every city a source covers. `HARVESTER_USER_AGENT`
-  (environment or `.env`) overrides `scraping.user_agent`. `config.model_dump(mode="json")` is
-  what goes into `ingest_run.config_snapshot`. Covered by `tests/test_config.py`.
+  pydantic models, one per section. Only checks that stop a config mistake from silently
+  producing wrong data (the "errors are visible" criterion) are included:
+  - `extra="forbid"`: a misspelt key (e.g. `keyowrds`) fails instead of leaving the filter
+    empty and the run "succeeding" with zero matches
+  - no blank keywords: an empty one would match every title
+  - `status_filters` limited to `AKTUELLE` / `BEENDETE`: a typo would skip those plans
+  - bounding boxes: exactly 4 values, min below max (a swapped box rejects every point)
+  - a bounding box for every city a source covers (else a `KeyError` after the whole scrape)
+  - field types (e.g. a quoted `"2"` delay becomes `2.0`)
+
+  `HARVESTER_USER_AGENT` (environment or `.env`) overrides `scraping.user_agent`.
+  `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`. Covered by
+  `tests/test_config.py`.
 - `rows_per_page` is not in the config: page sizes are a property of the portals, and both
   adapters page until no results are left.
 
@@ -1465,6 +1471,11 @@ Not required for acceptance. Pick up only once Phases 1-5 are done.
 
   `make` ships with macOS and most Linux systems; `just` reads better but is an extra
   install. Either way, don't hide steps the README doesn't also list.
+- **Stricter config validation.** Parked because each check guards against an unlikely
+  mistake rather than an acceptance criterion: `https://` pattern on `base_url`, value ranges
+  (delay >= 0, `retry_backoff_factor` >= 1, timeout > 0, lat/lon within -90..90 / -180..180),
+  non-empty `sources` / `cities` / `status_filters`, and a discriminated union on the source
+  `type` for clearer error messages.
 
 ---
 
