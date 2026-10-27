@@ -107,6 +107,18 @@ docker compose exec -T db psql -U iris -d iris < sql/validation_queries.sql
 - Incremental retrieval (skipping unchanged detail pages via a listing hash). The brief asks
   for idempotent re-runs, not fast ones; every run fetches every detail page (~30 min live,
   seconds against fixtures). A possible optimisation if live runs become frequent.
+- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The
+  brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees
+  on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
+- Storing non-industrial records. The objective is to *filter*; non-matches are only counted
+  (`records_filtered_out`). `--dry-run` prints every record with its filter decision for
+  tuning the keyword list.
+- Columns the brief doesn't ask for (plan type, plan number, procedure step, status,
+  participation period, Thema, description). They are kept as scraped in `raw_data`.
+- Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an
+  index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
+- Deleting rows that vanish from a portal or stop matching the filter. They stay, with an
+  older `ingest_run_id` (validation query 7).
 
 ---
 
@@ -148,7 +160,7 @@ iris-engg-assignment/
       db/
         __init__.py
         engine.py                   # SQLAlchemy engine from DatabaseSettings().url
-        upsert.py                   # INSERT ... ON CONFLICT with content_hash
+        upsert.py                   # INSERT ... ON CONFLICT (source, source_record_id)
       adapters/
         __init__.py
         base.py                     # BaseAdapter ABC, ScrapeResult, ScrapeError
@@ -267,28 +279,52 @@ bounding_boxes:
 
 ## Database Schema
 
+Every column traces back to a line in the brief; anything else scraped stays in `raw_data`.
+
+| Brief | Columns |
+|---|---|
+| "preserve source identifiers" | `source`, `source_record_id` |
+| "titles" | `title` |
+| "publication dates" + "verified rather than assumed" | `publication_date`, `date_source` |
+| "source URLs" / "traceable staging records" | `detail_url`, `ingest_run_id` |
+| "geographic context when available" | `city`, `district` |
+| "EPSG:25832 point geometries" | `geometry` |
+| "document ambiguous or unresolved locations" / "invalid coordinates are not silently accepted" | `geocode_status`, `geocode_reason` |
+| "errors and missing fields are visible" | `quality_flags` |
+| "filter industrial land-use zoning hearings" (why this row matched) | `matched_keywords` |
+| "malformed data" / "mapping assumptions" (the values as scraped) | `raw_data` |
+
+Only industrial matches are stored: the objective says *filter*. Non-matching records are
+counted in `ingest_run.records_filtered_out`, not stored. Fields that are scraped but not
+required (plan type, procedure step, status, participation period, Thema, description) live
+in `raw_data` only.
+
+No secondary indexes: at <1000 rows a sequential scan beats any index, and nothing queries
+the geometry spatially except validation, which reads every row anyway. The only index
+besides the primary key is the one behind `uq_source_record`, which `ON CONFLICT` requires.
+
 ### `iris_staging.ingest_run`
 
 Tracks each harvester execution for auditability and quality reporting.
 
 ```sql
 CREATE TABLE iris_staging.ingest_run (
-    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    finished_at         TIMESTAMPTZ,
-    source              TEXT NOT NULL,          -- 'sachsen_portal' | 'leipzig_stadtportal'
-    city                TEXT,                   -- 'dresden' | 'leipzig' | NULL (for multi-city runs)
-    status              TEXT NOT NULL DEFAULT 'running'
-                        CHECK (status IN ('running', 'completed', 'failed')),
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    started_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at          TIMESTAMPTZ,
+    source               TEXT NOT NULL,         -- 'sachsen_portal' | 'leipzig_stadtportal'
+    city                 TEXT,                  -- 'dresden' | 'leipzig' | NULL (for multi-city runs)
+    status               TEXT NOT NULL DEFAULT 'running'
+                         CHECK (status IN ('running', 'completed', 'failed')),
     -- NOT NULL so the quality report's sums never meet a NULL
-    records_scraped     INTEGER NOT NULL DEFAULT 0,
-    records_inserted    INTEGER NOT NULL DEFAULT 0,
-    records_updated     INTEGER NOT NULL DEFAULT 0,
-    records_unchanged   INTEGER NOT NULL DEFAULT 0,
-    records_rejected    INTEGER NOT NULL DEFAULT 0,
-    errors              JSONB NOT NULL DEFAULT '[]'::jsonb,
-    config_snapshot     JSONB,                 -- frozen copy of settings used
-    error_message       TEXT
+    records_scraped      INTEGER NOT NULL DEFAULT 0,
+    records_filtered_out INTEGER NOT NULL DEFAULT 0,  -- parsed fine, not industrial
+    records_rejected     INTEGER NOT NULL DEFAULT 0,  -- unusable (no ID or title), see errors
+    records_inserted     INTEGER NOT NULL DEFAULT 0,
+    records_updated      INTEGER NOT NULL DEFAULT 0,  -- already present, rewritten
+    errors               JSONB NOT NULL DEFAULT '[]'::jsonb,
+    config_snapshot      JSONB,                 -- frozen copy of settings used
+    error_message        TEXT
 );
 ```
 
@@ -296,60 +332,35 @@ CREATE TABLE iris_staging.ingest_run (
 
 ```sql
 CREATE TABLE iris_staging.signal_ingest (
-    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source              TEXT NOT NULL,          -- 'sachsen_portal' | 'leipzig_stadtportal'
-    source_record_id    TEXT NOT NULL,          -- portal-specific ID (numeric or slug)
-    content_hash        TEXT NOT NULL,          -- SHA-256 of all persisted output fields (see below)
-    ingest_run_id       UUID REFERENCES iris_staging.ingest_run(id),  -- run that last inserted/changed the row
-    last_seen_run_id    UUID REFERENCES iris_staging.ingest_run(id),  -- run that last saw the row
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source           TEXT NOT NULL,             -- 'sachsen_portal' | 'leipzig_stadtportal'
+    source_record_id TEXT NOT NULL,             -- portal-specific ID (numeric or slug)
+    ingest_run_id    UUID NOT NULL REFERENCES iris_staging.ingest_run(id),  -- run that last wrote the row
 
-    -- Plan identity
-    city                TEXT NOT NULL,          -- 'dresden' | 'leipzig'
-    plan_type           TEXT,                   -- 'Bebauungsplan', 'Flaechennutzungsplan', etc.
-    plan_number         TEXT,                   -- extracted: 'Nr. 3083', 'Nr. 10', etc.
-    title               TEXT NOT NULL,
-    description         TEXT,
+    city             TEXT NOT NULL,             -- 'dresden' | 'leipzig'
+    title            TEXT NOT NULL,
+    detail_url       TEXT NOT NULL,             -- traceability: every row links back to its source
+    district         TEXT,                      -- Stadtbezirk/Ortsteil
 
-    -- Status and procedure
-    status              TEXT,                   -- normalised: 'aktiv', 'beendet', 'im_verfahren', 'rechtskraeftig'
-    procedure_step      TEXT,                   -- 'fruehzeitige_beteiligung', 'oeffentliche_auslegung', etc.
+    publication_date DATE,                      -- only from an explicit publication field; never derived
+    date_source      TEXT                       -- NULL if no publication date found
+                     CHECK (date_source IN ('listing_card', 'detail_page')),
 
-    -- Location
-    district            TEXT,                   -- Stadtbezirk/Ortsteil
-    thema               TEXT,                   -- topic category (Leipzig sources)
+    -- Only industrial matches are stored, so there is always at least one keyword
+    matched_keywords TEXT[] NOT NULL CHECK (cardinality(matched_keywords) > 0),
 
-    -- Dates (with provenance)
-    participation_start DATE,
-    participation_end   DATE,
-    publication_date    DATE,                   -- only from an explicit publication field; never derived
-    date_source         TEXT                    -- NULL if no publication date found
-                        CHECK (date_source IN ('listing_card', 'detail_page')),
+    geometry         GEOMETRY(Point, 25832),
+    geocode_status   TEXT NOT NULL
+                     CHECK (geocode_status IN
+                            ('resolved_district_centroid', 'unresolved', 'rejected_out_of_bounds')),
+    geocode_reason   TEXT,                      -- e.g. 'district: Nordost / Schoenefeld-Ost' or rejection reason
 
-    -- URLs
-    detail_url          TEXT NOT NULL,          -- traceability: every row links back to its source
+    quality_flags    TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'missing_publication_date', 'missing_district',
+                                                    -- 'unparseable_date', 'detail_page_failed'
+    raw_data         JSONB NOT NULL,            -- all scraped fields as-is, plus filter evidence
 
-    -- Industrial filter
-    is_industrial       BOOLEAN NOT NULL DEFAULT FALSE,
-    matched_keywords    TEXT[],                 -- e.g. ARRAY['Gewerbe', 'GE']
-    match_reason        TEXT,                   -- 'keyword_title', 'keyword_description', 'thema_field', etc.
-
-    -- Geometry
-    geometry            GEOMETRY(Point, 25832),
-    geocode_status      TEXT NOT NULL
-                        CHECK (geocode_status IN
-                               ('resolved_district_centroid', 'unresolved', 'rejected_out_of_bounds')),
-    geocode_reason      TEXT,                   -- e.g. 'district: Nordost / Schoenefeld-Ost' or rejection reason
-
-    -- Data quality
-    quality_flags       TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'missing_publication_date', 'missing_district',
-                                                       -- 'unparseable_date', 'detail_page_failed'
-
-    -- Audit
-    raw_data            JSONB,                 -- full scraped payload
-    first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- first seen
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- last written, i.e. last seen
 
     -- Named: ON CONFLICT and the tests refer to it
     CONSTRAINT uq_source_record UNIQUE (source, source_record_id),
@@ -358,18 +369,15 @@ CREATE TABLE iris_staging.signal_ingest (
     CONSTRAINT ck_geometry_matches_status
         CHECK ((geocode_status = 'resolved_district_centroid') = (geometry IS NOT NULL))
 );
-
-CREATE INDEX idx_signal_ingest_city ON iris_staging.signal_ingest (city);
-CREATE INDEX idx_signal_ingest_is_industrial ON iris_staging.signal_ingest (is_industrial);
-CREATE INDEX idx_signal_ingest_status ON iris_staging.signal_ingest (status);
-CREATE INDEX idx_signal_ingest_geometry ON iris_staging.signal_ingest USING GIST (geometry);
 ```
 
 ### Upsert Logic
 
-Each batch is written in **one transaction with two statements**, so both rules hold:
-content columns and `updated_at` change only when content changed, and `last_seen_at`
-changes on every run.
+Idempotency comes from the natural key: `uq_source_record UNIQUE (source, source_record_id)`
+plus `INSERT ... ON CONFLICT DO UPDATE`. Re-running over the same data cannot add rows. There
+is **no change detection**: an existing row is always rewritten with the latest values. Nothing
+in the brief consumes "what changed", so telling a real change apart from a re-scrape isn't
+worth a hash column and its tests (see "What We Are NOT Doing").
 
 **Step 0: de-duplicate the batch in Python.** PostgreSQL rejects an `INSERT ... ON CONFLICT
 DO UPDATE` that touches the same key twice ("command cannot affect row a second time").
@@ -377,17 +385,14 @@ Records with a repeated `(source, source_record_id)` in one batch (e.g. a card s
 listing pages while the portal re-sorts) are collapsed to the last occurrence. Each one
 dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
 
-**Step 1: insert or change content.**
+**Step 1: insert or overwrite.**
 
 ```sql
 INSERT INTO iris_staging.signal_ingest (
-    source, source_record_id, content_hash, ingest_run_id, last_seen_run_id,
-    city, plan_type, plan_number, title, description,
-    status, procedure_step, district, thema,
-    participation_start, participation_end, publication_date, date_source,
-    detail_url, is_industrial, matched_keywords, match_reason,
-    geometry, geocode_status, geocode_reason, quality_flags,
-    raw_data, first_seen_at, last_seen_at
+    source, source_record_id, ingest_run_id,
+    city, title, detail_url, district,
+    publication_date, date_source, matched_keywords,
+    geometry, geocode_status, geocode_reason, quality_flags, raw_data
 )
 VALUES (
     ...,
@@ -396,48 +401,26 @@ VALUES (
     ...
 )
 ON CONFLICT (source, source_record_id) DO UPDATE SET
-    content_hash        = EXCLUDED.content_hash,
-    ingest_run_id       = EXCLUDED.ingest_run_id,
-    city                = EXCLUDED.city,
-    plan_type           = EXCLUDED.plan_type,
-    plan_number         = EXCLUDED.plan_number,
-    title               = EXCLUDED.title,
-    description         = EXCLUDED.description,
-    status              = EXCLUDED.status,
-    procedure_step      = EXCLUDED.procedure_step,
-    district            = EXCLUDED.district,
-    thema               = EXCLUDED.thema,
-    participation_start = EXCLUDED.participation_start,
-    participation_end   = EXCLUDED.participation_end,
-    publication_date    = EXCLUDED.publication_date,
-    date_source         = EXCLUDED.date_source,
-    detail_url          = EXCLUDED.detail_url,
-    is_industrial       = EXCLUDED.is_industrial,
-    matched_keywords    = EXCLUDED.matched_keywords,
-    match_reason        = EXCLUDED.match_reason,
-    geometry            = EXCLUDED.geometry,
-    geocode_status      = EXCLUDED.geocode_status,
-    geocode_reason      = EXCLUDED.geocode_reason,
-    quality_flags       = EXCLUDED.quality_flags,
-    raw_data            = EXCLUDED.raw_data,
-    updated_at          = NOW()
-WHERE iris_staging.signal_ingest.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-RETURNING source_record_id, (xmax = 0) AS inserted;
+    ingest_run_id    = EXCLUDED.ingest_run_id,
+    city             = EXCLUDED.city,
+    title            = EXCLUDED.title,
+    detail_url       = EXCLUDED.detail_url,
+    district         = EXCLUDED.district,
+    publication_date = EXCLUDED.publication_date,
+    date_source      = EXCLUDED.date_source,
+    matched_keywords = EXCLUDED.matched_keywords,
+    geometry         = EXCLUDED.geometry,
+    geocode_status   = EXCLUDED.geocode_status,
+    geocode_reason   = EXCLUDED.geocode_reason,
+    quality_flags    = EXCLUDED.quality_flags,
+    raw_data         = EXCLUDED.raw_data,
+    updated_at       = NOW()
+RETURNING (xmax = 0) AS inserted;
 ```
 
-**Step 2: mark every record in the batch as seen.**
-
-```sql
-UPDATE iris_staging.signal_ingest
-SET last_seen_at = :run_started_at, last_seen_run_id = :run_id
-WHERE source = :source AND source_record_id = ANY(:batch_ids);
-```
-
-**Counting:**
-- `inserted` = rows returned by step 1 with `inserted = true`
-- `updated` = rows returned with `inserted = false`
-- `unchanged` = batch size minus rows returned (the `WHERE` skipped them, so `RETURNING`
-  omits them)
+**Counting:** `inserted` = rows returned with `inserted = true`; `updated` = the rest. A
+re-run over unchanged data therefore reports 0 inserted and N updated, with the row count
+and every `id` and `created_at` unchanged.
 
 `xmax = 0` is the standard PostgreSQL test for whether a row from an `ON CONFLICT` upsert
 was newly inserted. It's covered by a test.
@@ -450,14 +433,9 @@ transaction, collecting each `RETURNING` row. That's simple, keeps the per-recor
 obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one
 `executemany` call isn't something to rely on with `text()`.
 
-**What `content_hash` covers:** a SHA-256 over a canonical JSON of **every persisted output
-column** except the audit and run columns (`id`, the hash itself, the run IDs, `first_seen_at`,
-`last_seen_at`, `created_at`, `updated_at`, `raw_data`). That includes the derived fields:
-`is_industrial`, `matched_keywords`, `match_reason`, `geometry` (as rounded WKT),
-`geocode_status`, `geocode_reason` and `quality_flags`. So a change to the keyword config or
-the centroid CSV changes the hash and propagates to existing rows on the next run, even if
-the portal content didn't change. `raw_data` is excluded so cosmetic HTML changes (e.g.
-tracking parameters) don't trigger updates.
+**Rows are never deleted.** A plan that disappears from a portal, or stops matching after the
+keyword list changes, keeps its row; its `ingest_run_id` then points at an older run than the
+latest one for its source (validation query 7 lists these).
 
 ---
 
@@ -481,7 +459,6 @@ from dataclasses import dataclass, field
 class FilterResult:
     is_industrial: bool
     matched_keywords: list[str] = field(default_factory=list)  # canonical keywords from config
-    match_reason: str = "no_match"  # comma-joined: 'thema_field', 'keyword_title', 'keyword_description'
     evidence: list[str] = field(default_factory=list)  # matched words, e.g. 'Gewerbestandort'
 
 
@@ -506,26 +483,21 @@ class IndustrialFilter:
     def check(self, title: str, description: str | None, thema: str | None) -> FilterResult:
         keywords: list[str] = []
         evidence: list[str] = []
-        reasons: list[str] = []
 
         if thema and thema in self._thema:
             keywords.append(f"thema:{thema}")
-            reasons.append("thema_field")
 
-        for reason, text in (("keyword_title", title), ("keyword_description", description)):
+        for text in (title, description):
             if not text:
                 continue
             kws, ev = self._scan(text)
-            if kws:
-                reasons.append(reason)
-                keywords.extend(kws)
-                evidence.extend(ev)
+            keywords.extend(kws)
+            evidence.extend(ev)
 
         unique = list(dict.fromkeys(keywords))
         return FilterResult(
             is_industrial=bool(unique),
             matched_keywords=unique,
-            match_reason=", ".join(reasons) if reasons else "no_match",
             evidence=list(dict.fromkeys(evidence)),
         )
 ```
@@ -533,8 +505,11 @@ class IndustrialFilter:
 `evidence` goes into `raw_data` and the quality report, so false positives (e.g.
 "Gewerbesteuer" in a description) can be spotted and the keyword list tuned.
 
-All Bauleitplan rows from both cities are stored with the `is_industrial` flag, making
-the filter auditable. Downstream consumers query `WHERE is_industrial = TRUE`.
+Only records with `is_industrial = True` are stored; `matched_keywords` is the stored
+evidence for why each row is there (a `thema:` prefix marks a Leipzig Thema match). The
+filter reads `description` and `thema`, but those are kept only in `raw_data`. Non-matches
+are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its
+filter decision, so false negatives can be checked while tuning the keyword list.
 
 ---
 
@@ -588,7 +563,8 @@ This is documented in the README and the centroid CSV provenance notes.
    Phase 2 must first confirm whether a GET parameter can set the status filter. If one can,
    prefer it over clicking.
 3. Wait for `div.nbp-teaser` to appear (or timeout = empty result).
-4. Extract all cards on the page:
+4. Extract all cards on the page (only title, link and dates become columns; the rest goes
+   into `raw_data` as scraped):
    - Title: `h3.nbp-teaser-title > a` (text + href)
    - Plan type: `span.nbp-teaser-taglist--beteiligungstyp`
    - Authority: `span.nbp-teaser-taglist--mandant`
@@ -599,7 +575,7 @@ This is documented in the README and the centroid CSV provenance notes.
 5. If paginator exists, click the "next" button (`a` in paginator with `ui-paginator-next`),
    wait for content update, repeat. Playwright handles the PrimeFaces AJAX/ViewState
    transparently.
-6. For each card, navigate to the detail page to scrape description and documents.
+6. For each card, navigate to the detail page to scrape description and publication date.
 7. Between page loads: `page.wait_for_timeout(config.request_delay_seconds * 1000)`.
 
 **Source record ID:** Numeric ID extracted from the detail URL path.
@@ -613,7 +589,7 @@ an empty list (not an exception). Log a warning. The `ingest_run` records 0 scra
 
 1. `page.goto(f"{base_url}{listing_path}")` -- loads first 50 rows.
 2. Wait for `tr[id^="project-"]` rows.
-3. Extract all rows:
+3. Extract all rows (status and Thema go into `raw_data`; Thema is also a filter input):
    - Title + detail link: `a.filterlist-detailpage > span`
    - Status: 2nd `td > ul > li` text
    - District: 3rd `td > ul > li` text
@@ -621,7 +597,7 @@ an empty list (not an exception). Log a warning. The `ingest_run` records 0 scra
    - Project ID: from `tr` id attribute (e.g., `project-1751` -> `1751`)
 4. Paginate via `page.goto` with `?tx_lepurpose[filter][page]=N` (N = 2, 3, ...) until
    no more rows appear.
-5. For each row, navigate to detail page for description and document links.
+5. For each row, navigate to detail page for description and publication date.
 6. Polite delay between requests.
 
 **Source record ID:** Project ID from the table row (e.g., `1751`).
@@ -629,28 +605,23 @@ an empty list (not an exception). Log a warning. The `ingest_run` records 0 scra
 ### Common: ScrapedRecord Model
 
 ```python
+from datetime import date
+
 from pydantic import BaseModel
-from datetime import date, datetime
 
 class ScrapedRecord(BaseModel):
     source: str                    # 'sachsen_portal' | 'leipzig_stadtportal'
     source_record_id: str          # stable ID from the source
     city: str                      # 'dresden' | 'leipzig'
     title: str
-    description: str | None = None
-    plan_type: str | None = None
-    plan_number: str | None = None  # extracted via regex from title
-    status: str | None = None
-    procedure_step: str | None = None
+    detail_url: str
     district: str | None = None
-    thema: str | None = None
-    participation_start: date | None = None
-    participation_end: date | None = None
     publication_date: date | None = None
     date_source: str | None = None
-    detail_url: str
+    description: str | None = None  # filter input only; stored in raw_data
+    thema: str | None = None        # filter input only (Leipzig); stored in raw_data
     raw_html: str | None = None     # preserved for debugging, not stored in DB
-    raw_data: dict                  # all scraped fields as-is
+    raw_data: dict                  # all scraped fields as-is (incl. status, procedure step, period)
 ```
 
 ---
@@ -697,7 +668,7 @@ The brief requires dates to be verified, not assumed, so:
   Candidate labels include "veröffentlicht am", "Bekanntmachung vom" and "Amtsblatt vom". The
   exact selector for each source is confirmed when fixtures are captured in Phase 2 and
   recorded in the README.
-- It is **never** copied from `participation_start` or derived from `scraped_at`.
+- It is **never** copied from the participation period (`Laufzeit`) or derived from `scraped_at`.
 - `date_source` records where each date came from (`listing_card` | `detail_page`).
 - If no publication field exists, `publication_date` stays NULL and
   `quality_flags` gets `missing_publication_date`.
@@ -712,8 +683,8 @@ The same Leipzig Bauleitplan may appear in both the Saxon state portal and the L
 city portal. These are stored as **separate rows** with different `source` values.
 
 Potential matching strategy (not implemented, documented for future work):
-- Match on `plan_number` (e.g., "Nr. 456") after normalisation.
-- Match on title fuzzy similarity.
+- Match on the plan number in the title (e.g., "Nr. 456") after normalisation.
+- Match on title fuzzy similarity (validation query 6 lists exact title matches).
 - A future `iris_staging.signal_match` table could link `source_record_id` pairs.
 
 The `source` column and `UNIQUE (source, source_record_id)` constraint ensure no
@@ -894,7 +865,7 @@ it as `***`, and the engine is built with `hide_parameters=True`.
   - `CREATE SCHEMA IF NOT EXISTS iris_staging` (already created by `env.py`; kept so the
     migration's own SQL is complete when read on its own)
   - Create `iris_staging.ingest_run`, then `iris_staging.signal_ingest` (it references
-    `ingest_run`), with all columns, CHECK constraints and indexes
+    `ingest_run`), with all columns and constraints. No `CREATE INDEX`: see **Database Schema**
   - `downgrade()` drops **only the two tables**. It keeps the `postgis` extension, which other
     schemas in a shared database may depend on, and the `iris_staging` schema, which holds
     Alembic's version table and may hold other pipelines' tables. Same rule for both: a
@@ -926,8 +897,9 @@ it as `***`, and the engine is built with `hide_parameters=True`.
 - [ ] `SELECT PostGIS_Version();` returns `3.4`
 - [ ] Geometry column has SRID 25832
 - [ ] The constraints bite: an insert with `geocode_status = 'resolved_district_centroid'`
-      and a NULL geometry fails with `ck_geometry_matches_status`, and an unknown
-      `geocode_status` value fails its CHECK
+      and a NULL geometry fails with `ck_geometry_matches_status`, an unknown
+      `geocode_status` value fails its CHECK, an empty `matched_keywords` fails its CHECK,
+      and a repeated `(source, source_record_id)` fails `uq_source_record`
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 2.
 
@@ -987,8 +959,7 @@ class BaseAdapter(ABC):
   PrimeFaces paginator, visits detail pages.
 - `_parse_listing_card(card_element) -> ScrapedRecord` -- extracts fields from a
   `div.nbp-teaser` element.
-- `_parse_detail_page(page) -> dict` -- extracts description, documents from detail page.
-- `_extract_plan_number(title: str) -> str | None` -- regex to pull "Nr. XXXX" from title.
+- `_parse_detail_page(page) -> dict` -- extracts description and publication date.
 - Retry logic wrapping each page navigation.
 
 #### 4. `src/harvester/adapters/leipzig_stadtportal.py`
@@ -1045,9 +1016,6 @@ def test_count_mismatch_logged(page):
 def test_handles_empty_listing(page):
     """Empty fixture returns ScrapeResult with no records and no exception."""
 
-def test_extracts_plan_number():
-    """Regex extracts 'Nr. 3083' from various title formats."""
-
 def test_handles_malformed_card(page):
     """Card without ID -> ScrapeError in result.errors; other cards still parsed."""
 ```
@@ -1096,23 +1064,19 @@ def test_raises_fetch_error_when_retries_exhausted(page): ...
 ### Overview
 
 Implement the normalisation pipeline that transforms `ScrapedRecord` into
-`NormalisedRecord` with industrial filter, geocoding, and content hashing.
+`NormalisedRecord` with industrial filter and geocoding, dropping non-matches.
 
 ### Changes Required
 
 #### 1. `src/harvester/pipeline/normalise.py`
 
-- Status normalisation: map German status strings to enum values
-  (`aktiv`, `beendet`, `im_verfahren`, `rechtskraeftig`).
-- Procedure step normalisation: `Frühzeitige Beteiligung` -> `fruehzeitige_beteiligung`.
-- Date parsing: `DD.MM.YYYY` strings to `datetime.date`. Unparseable strings become NULL
-  plus a `unparseable_date` quality flag. Publication date follows **Publication Dates**.
-- Plan number extraction: regex for "Nr. XXXX" patterns.
+- Publication date parsing: `DD.MM.YYYY` strings to `datetime.date`, following
+  **Publication Dates**. Unparseable strings become NULL plus a `unparseable_date` quality
+  flag. Other scraped values (status, procedure step, participation period) are not
+  normalised; they stay as scraped in `raw_data`.
 - Quality flags: `missing_publication_date`, `missing_district`, `unparseable_date`,
   `detail_page_failed`.
-- `content_hash`: SHA-256 of the canonical JSON of every persisted output field, including
-  derived ones (filter result, geometry WKT, geocode status, quality flags). See
-  **Upsert Logic**. It is computed **after** filter and geocode, as the last pipeline step.
+- Records the filter doesn't match are dropped here and counted as `records_filtered_out`.
 
 #### 2. `src/harvester/pipeline/filter.py`
 
@@ -1137,16 +1101,11 @@ Stadtbezirke (10) and common Ortsteile. WGS84 coordinates with provenance.
 
 ```python
 # tests/test_normalise.py
-def test_status_normalisation():
 def test_date_parsing_german_format():
 def test_unparseable_date_flagged_not_raised():
-def test_publication_date_never_copied_from_participation_start():
+def test_publication_date_never_copied_from_participation_period():
 def test_missing_publication_date_flagged():
-def test_content_hash_deterministic():
-def test_content_hash_changes_on_update():
-def test_content_hash_changes_when_filter_config_changes():
-def test_content_hash_changes_when_centroid_changes():
-def test_content_hash_ignores_raw_data():
+def test_non_industrial_records_dropped_and_counted():
 
 # tests/test_filter.py
 def test_matches_gewerbegebiet_in_title():
@@ -1156,7 +1115,7 @@ def test_matches_GE_case_sensitive():
 def test_no_false_positive_on_lowercase_ge():  # "gegen" should not match
 def test_short_codes_not_matched_inside_words():  # "GIESSEN", "GEMEINDE" -> no match
 def test_matches_thema_gewerbe():
-def test_reasons_include_all_sources():  # thema + title + description all listed
+def test_keywords_collected_from_thema_title_and_description():
 def test_no_match_returns_false():
 def test_keywords_from_config():
 
@@ -1199,10 +1158,9 @@ and integration tests including idempotent re-run and duplicate detection.
   using `text()` statements on a SQLAlchemy Core connection (no ORM session)
 - Implements **Upsert Logic** exactly, in one transaction per batch:
   - de-duplicate the batch, logging dropped duplicates as `duplicate_in_batch`
-  - step 1: `INSERT ... ON CONFLICT ... WHERE content_hash IS DISTINCT FROM ... RETURNING (xmax = 0)`
-  - step 2: `UPDATE last_seen_at, last_seen_run_id` for every key in the batch
-- Returns `UpsertStats(inserted, updated, unchanged, duplicates_in_batch)`, derived from
-  `RETURNING` as described there.
+  - `INSERT ... ON CONFLICT (source, source_record_id) DO UPDATE ... RETURNING (xmax = 0)`
+- Returns `UpsertStats(inserted, updated, duplicates_in_batch)`, derived from `RETURNING`
+  as described there.
 
 #### 2. `src/harvester/cli.py` (+ `__main__.py`)
 
@@ -1236,22 +1194,16 @@ def test_insert_new_records(db_session):
     """First run inserts all records."""
 
 def test_rerun_creates_no_duplicates(db_session):
-    """Second run with same data: 0 inserted, 0 updated, N unchanged; row count unchanged."""
+    """Second run with same data: 0 inserted, N updated; row count, ids and created_at unchanged."""
 
-def test_update_on_content_change(db_session):
-    """Modified record triggers update, content_hash and updated_at change."""
-
-def test_unchanged_rerun_keeps_updated_at(db_session):
-    """Unchanged records: updated_at and ingest_run_id stay the same."""
-
-def test_last_seen_at_always_updates(db_session):
-    """Even unchanged records get last_seen_at and last_seen_run_id bumped."""
+def test_rerun_overwrites_changed_content(db_session):
+    """Modified record is rewritten in place: new title, new ingest_run_id, same id."""
 
 def test_duplicate_keys_in_one_batch(db_session):
     """Same key twice in a batch -> one row, no DB error, duplicate logged."""
 
-def test_filter_config_change_propagates(db_session):
-    """Re-run with a new keyword list updates is_industrial on existing rows."""
+def test_filter_config_change_updates_keywords(db_session):
+    """Re-run with a new keyword list rewrites matched_keywords on existing rows."""
 
 # tests/test_bounding_box.py
 def test_out_of_bounds_stored_with_null_geometry(db_session):
@@ -1282,7 +1234,7 @@ def test_errors_visible_in_ingest_run(db_session, page):
 #### Manual Verification
 - [ ] `python -m harvester run` against live portals populates the DB
 - [ ] `SELECT count(*), source FROM iris_staging.signal_ingest GROUP BY source` shows expected counts
-- [ ] Re-run produces 0 inserts, 0 updates (unless portal data changed)
+- [ ] Re-run produces 0 inserts and the same row count
 - [ ] Dresden row count is about current + finished, matching the paginator totals from both passes
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 5.
@@ -1310,16 +1262,16 @@ Finished:      2026-10-27 14:32:15 UTC
 Source:        sachsen_portal (dresden)
 
 Records scraped:    251
-Records inserted:    12
-Records updated:      3
-Records unchanged:  236
-Records rejected:     0
+Filtered out:       243   (not industrial)
+Rejected:             0   (unusable, see errors)
+Industrial matches:   8 / 251 (3.2%)
+  inserted:           2
+  updated:            6   (already present, rewritten)
 Errors:               0
 
-Industrial matches:   8 / 251 (3.2%)
-Geocode resolved:   245 / 251 (97.6%)
-Geocode unresolved:   6 / 251 (2.4%)
-Geocode rejected:     0 / 251 (0.0%)
+Geocode resolved:     7 / 8
+Geocode unresolved:   1 / 8
+Geocode rejected:     0 / 8
 
 Top matched keywords:
   Gewerbe          - 5 records
@@ -1333,10 +1285,9 @@ Top matched keywords:
 -- 1. Total records by source and city
 SELECT source, city, count(*) FROM iris_staging.signal_ingest GROUP BY 1, 2;
 
--- 2. Industrial matches by city
-SELECT city, count(*) FILTER (WHERE is_industrial) AS industrial,
-       count(*) AS total
-FROM iris_staging.signal_ingest GROUP BY city;
+-- 2. Quality flag distribution
+SELECT unnest(quality_flags) AS flag, count(*)
+FROM iris_staging.signal_ingest GROUP BY 1 ORDER BY 2 DESC;
 
 -- 3. Geocode status distribution
 SELECT geocode_status, count(*) FROM iris_staging.signal_ingest GROUP BY 1;
@@ -1345,27 +1296,31 @@ SELECT geocode_status, count(*) FROM iris_staging.signal_ingest GROUP BY 1;
 SELECT source, source_record_id, title, geocode_status, geocode_reason
 FROM iris_staging.signal_ingest WHERE geometry IS NULL;
 
--- 5. Most recent ingest runs
-SELECT id, source, city, status, records_scraped, records_inserted,
-       records_updated, records_unchanged, records_rejected,
-       started_at, finished_at
+-- 5. Most recent ingest runs (filtered_out vs inserted + updated is the match rate)
+SELECT id, source, city, status, records_scraped, records_filtered_out,
+       records_rejected, records_inserted, records_updated,
+       jsonb_array_length(errors) AS errors, started_at, finished_at
 FROM iris_staging.ingest_run ORDER BY started_at DESC LIMIT 10;
 
--- 6. Duplicate detection: same plan_number across sources
-SELECT plan_number, array_agg(source || ':' || source_record_id) AS sources
+-- 6. Possible cross-source duplicates: same title on both portals (documented, not merged)
+SELECT lower(title) AS title, array_agg(source || ':' || source_record_id) AS records
 FROM iris_staging.signal_ingest
-WHERE plan_number IS NOT NULL
-GROUP BY plan_number
+GROUP BY 1
 HAVING count(DISTINCT source) > 1;
 
--- 7. Keyword match distribution
+-- 7. Stale rows: not written by the latest completed run of their source
+SELECT s.source, s.source_record_id, s.title, s.updated_at
+FROM iris_staging.signal_ingest s
+WHERE s.ingest_run_id <> (
+    SELECT r.id FROM iris_staging.ingest_run r
+    WHERE r.source = s.source AND r.status = 'completed'
+    ORDER BY r.started_at DESC LIMIT 1
+);
+
+-- 8. Keyword match distribution
 SELECT unnest(matched_keywords) AS keyword, count(*)
 FROM iris_staging.signal_ingest
-WHERE is_industrial = TRUE
 GROUP BY 1 ORDER BY 2 DESC;
-
--- 8. Status distribution
-SELECT status, count(*) FROM iris_staging.signal_ingest GROUP BY 1;
 
 -- 9. Geometry bounding box check (should return 0 rows)
 SELECT source_record_id, title, ST_AsText(geometry),
@@ -1381,8 +1336,8 @@ WHERE geometry IS NOT NULL
 
 #### 3. `sample_output/signal_ingest_sample.csv` and `sample_output/signal_ingest_sample.geojson`
 
-Generated from a real run against the portals. CSV with all columns. GeoJSON with
-`is_industrial = TRUE` records only, for visual inspection.
+Generated from a real run against the portals. CSV with all columns. GeoJSON with the rows
+that have a geometry, for visual inspection.
 
 #### 4. `README.md`
 
@@ -1439,15 +1394,14 @@ filter evidence for spotting false positives.
 
 ### Unit Tests
 - Adapter HTML parsing (from fixtures, no network)
-- Normalisation functions (status mapping, date parsing, plan number extraction)
+- Normalisation functions (publication date parsing, quality flags, dropping non-matches)
 - Industrial keyword filter (positive matches, negative matches, case sensitivity)
 - Geocode lookup (known districts, unknown districts, out-of-bounds)
-- Content hash determinism
 
 ### Integration Tests
 - Full pipeline: fixture HTML -> adapter -> normalise -> filter -> geocode -> upsert -> DB query
-- Idempotent re-run: same fixtures upserted twice, verify 0 new rows
-- Content change detection: modify fixture, verify update counted
+- Idempotent re-run: same fixtures upserted twice, verify 0 new rows and stable ids
+- Content change: modify fixture, verify the existing row is rewritten in place
 - Out-of-bounds coordinates: verify NULL geometry + rejection status stored
 
 ### Test Infrastructure
@@ -1476,8 +1430,8 @@ filter evidence for spotting false positives.
   A live run is ~840 page loads (~37 listing + ~800 detail), about 30 minutes at a 2s
   delay. Every run fetches every detail page (no incremental mode; see "What We Are NOT
   Doing"). Re-run and idempotency demos use the saved fixtures and take seconds.
-- **Database:** Small table (<1000 rows). No partitioning or special indexing needed beyond
-  the defined indexes.
+- **Database:** Small table (<1000 rows, only industrial matches). No indexes beyond the
+  primary key and `uq_source_record`; see **Database Schema**.
 - **Memory:** HTML pages are small (<100KB each). No memory concerns.
 - **Playwright startup:** Single browser instance, reused across all adapters.
 
