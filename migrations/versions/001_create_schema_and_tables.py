@@ -60,11 +60,11 @@ def upgrade() -> None:
             city             TEXT NOT NULL,
             title            TEXT NOT NULL,
             detail_url       TEXT NOT NULL,
-            district         TEXT,
+            -- As the source gives it: street address (state portal) or district(s) (city portal)
+            location_text    TEXT,
 
+            -- Start of the detail page's "Zeitraum"; the raw text stays in raw_data
             publication_date DATE,
-            date_source      TEXT
-                             CHECK (date_source IN ('listing_card', 'detail_page')),
 
             -- Only industrial matches are stored, so there is always at least one keyword
             matched_keywords TEXT[] NOT NULL CHECK (cardinality(matched_keywords) > 0),
@@ -72,7 +72,7 @@ def upgrade() -> None:
             geometry         GEOMETRY(Point, 25832),
             geocode_status   TEXT NOT NULL
                              CHECK (geocode_status IN (
-                                 'resolved_district_centroid',
+                                 'source_coordinates',
                                  'unresolved',
                                  'rejected_out_of_bounds'
                              )),
@@ -86,9 +86,9 @@ def upgrade() -> None:
 
             -- Named: ON CONFLICT and the tests refer to it
             CONSTRAINT uq_source_record UNIQUE (source, source_record_id),
-            -- A point exists exactly when the location was resolved
+            -- A point exists exactly when the source gave usable coordinates
             CONSTRAINT ck_geometry_matches_status
-                CHECK ((geocode_status = 'resolved_district_centroid') = (geometry IS NOT NULL))
+                CHECK ((geocode_status = 'source_coordinates') = (geometry IS NOT NULL))
         )
         """
     )

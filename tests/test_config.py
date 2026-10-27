@@ -7,7 +7,7 @@ import yaml
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
 
-from harvester.config import DatabaseSettings, SachsenSource, load_config
+from harvester.config import DatabaseSettings, LeipzigStadtSource, SachsenSource, load_config
 
 # Characters that break a hand-written postgresql:// URL unless percent-encoded
 TRICKY_PASSWORD = "p@ss:w/rd%#?"
@@ -75,6 +75,10 @@ def test_repo_settings_load() -> None:
     sachsen = config.sources[0]
     assert isinstance(sachsen, SachsenSource)
     assert sachsen.city_slugs == ["dresden", "leipzig"]
+    leipzig = config.sources[1]
+    assert isinstance(leipzig, LeipzigStadtSource)
+    assert leipzig.status_filter_id == 252
+    assert config.scraping.timeout_seconds == 30.0
     assert config.bounding_boxes["dresden"].min_lon == 13.55
     assert "Gewerbe" in config.industrial_filter.keywords
     assert config.scraping.user_agent == "IRIS-SIG-08-Harvester/1.0 (bot)"

@@ -8,22 +8,24 @@ sources:
       - slug: leipzig
         label: "Stadt Leipzig"
     format_filter: "Bauleitplan"
-    # One scrape pass per status; BEENDETE is needed for historical plans
+    # One listing request per status; BEENDETE is needed for finished procedures
     status_filters: ["AKTUELLE", "BEENDETE"]
 
   - name: leipzig_stadtportal
     type: leipzig_stadt
     base_url: "https://www.leipzig.de"
     listing_path: "/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene"
+    # tx_lepurpose[filter][89][] value for "im Verfahren"; "rechtskräftig" (251) plans are
+    # in force, not hearings
+    status_filter_id: 252
 
 scraping:
-  headless: true
   request_delay_seconds: 2.0
   max_retries: 3
   retry_backoff_factor: 2.0
   # Override via HARVESTER_USER_AGENT env var to add an operator contact address
   user_agent: "IRIS-SIG-08-Harvester/1.0 (bot)"
-  page_timeout_ms: 30000
+  timeout_seconds: 30.0
 
 industrial_filter:
   # Case-insensitive match anywhere inside a word, so German compounds hit

@@ -101,6 +101,8 @@ class LeipzigStadtSource(_StrictModel):
     name: str
     base_url: str
     listing_path: str
+    # tx_lepurpose[filter][89][] value for "im Verfahren"
+    status_filter_id: int
 
     @property
     def city_slugs(self) -> list[str]:
@@ -109,12 +111,11 @@ class LeipzigStadtSource(_StrictModel):
 
 
 class ScrapingConfig(_StrictModel):
-    headless: bool
     request_delay_seconds: float
     max_retries: int
     retry_backoff_factor: float
     user_agent: str
-    page_timeout_ms: int
+    timeout_seconds: float
 
 
 class IndustrialFilterConfig(_StrictModel):

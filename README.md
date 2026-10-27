@@ -2,6 +2,11 @@
 
 Filter industrial land-use zoning hearings around Dresden and Leipzig.
 
+Sources, both public pages fetched with plain HTTP GET requests (no browser needed):
+
+- Saxon state participation portal, `buergerbeteiligung.sachsen.de` (Dresden and Leipzig)
+- Leipzig city plan register, `www.leipzig.de` (plans "im Verfahren" only)
+
 ## Setup
 
 ### Prerequisites
@@ -16,20 +21,17 @@ Filter industrial land-use zoning hearings around Dresden and Leipzig.
 # 1. Install Python dependencies
 uv sync --extra dev
 
-# 2. Download Chromium build that Playwright drives
-uv run playwright install chromium
-
-# 3. Create your local .env and set POSTGRES_PASSWORD in it; without this
+# 2. Create your local .env and set POSTGRES_PASSWORD in it; without this
 # variable, `docker compose up` refuses to start.
 cp .env.example .env
 
-# 4. Start PostgreSQL/PostGIS and wait until it reports "healthy"
+# 3. Start PostgreSQL/PostGIS and wait until it reports "healthy"
 # This step creates 2 databases - `iris` for the harvester and `iris_test` for
 # the database tests, both with PostGIS
 docker compose up -d
 docker compose ps
 
-# 5. Create the database schema
+# 4. Create the database schema
 uv run alembic upgrade head
 ```
 
@@ -61,7 +63,7 @@ uv run alembic upgrade head
 # Stop the container; data is kept for the next `docker compose up -d`
 docker compose down
 
-# Reset: also delete the data volume (all harvested rows), then start from step 4
+# Reset: also delete the data volume (all harvested rows), then start from step 3
 docker compose down -v
 ```
 
