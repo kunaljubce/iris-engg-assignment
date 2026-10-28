@@ -60,7 +60,7 @@ def upgrade() -> None:
             city             TEXT NOT NULL,
             title            TEXT NOT NULL,
             detail_url       TEXT NOT NULL,
-            -- As the source gives it: street address (state portal) or district(s) (city portal)
+            -- Street address as the source gives it
             location_text    TEXT,
 
             -- Start of the detail page's "Zeitraum"; the raw text stays in raw_data

@@ -308,9 +308,7 @@ repository is public.
   in `settings.yml`, with no code changes.
 - **The portal lists only what a city publishes there.** Leipzig has 23 procedures on it;
   on 2026-10-28 the two industrial ones are both finished, so there is no open Leipzig
-  hearing in the data. Leipzig's own plan register (`www.leipzig.de`) lists more plans in
-  progress, but it is not the source named in the brief and gives no dates or
-  coordinates, so it is not read.
+  hearing in the data.
 - **The filter reads titles only.** A plan whose title names a place but not the use
   (e.g. "Bebauungsplan Nr. 422 Radefelder Allee West") is missed. Descriptions are not
   read, because they mention "Gewerbe" in passing and would add false positives.
