@@ -1,6 +1,6 @@
 """The one place HTTP requests are made, so the retry and politeness rules live in one spot.
 
-Rules (see "Resilience" in the plan):
+Rules (see "Resilience" in docs/IMPLEMENTATION.md):
 - network errors, timeouts, 5xx and 429 are retried up to `max_retries` times after the
   first attempt, waiting `retry_backoff_factor ** n` seconds before retry n (2, 4, 8 s);
   a 429's `Retry-After` (in seconds) replaces that wait

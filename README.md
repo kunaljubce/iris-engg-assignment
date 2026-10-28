@@ -15,6 +15,8 @@ IRIS-SIG-08: harvest land-use plan hearings (Bauleitplanverfahren) for Dresden a
 | Run tracking | `runner.py` | one `ingest_run` row per run, with counts and errors |
 | CLI | `cli.py`, `report.py` | `harvester run` and `harvester report` |
 
+More detail: [Design](docs/DESIGN.md) · [Implementation](docs/IMPLEMENTATION.md) · [Tests](docs/TESTS.md)
+
 ## Data source
 
 The Saxon state participation portal, `buergerbeteiligung.sachsen.de` is a public site, read with plain HTTP GET requests: no login, no browser, no API key. The saved pages and their URLs are in `tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
@@ -45,7 +47,8 @@ The Saxon state participation portal, `buergerbeteiligung.sachsen.de` is a publi
 - **Publication date = start of the "Zeitraum".** The portal has no "published on" field. The detail page's "Zeitraum 12.10.2026 bis 13.11.2026" is the period the draft is publicly displayed (BauGB § 3 (2)), so its start date is used. The raw text is kept in `raw_data`.
 - **The marker coordinates are the plan's location.** They are WGS84 and checked against the city's bounding box in `settings.yml`. 
   - Outside the box, or not a number: `rejected_out_of_bounds` with no point, the raw values kept in `raw_data`. 
-  - Missing: `unresolved`. Inside: transformed to EPSG:25832 by PostGIS (`source_coordinates`).
+  - Missing: `unresolved`. 
+  - Inside: transformed to EPSG:25832 by PostGIS (`source_coordinates`).
 - **A record that couldn't be read completely is still stored, flagged:** e.g. `missing_publication_date` or `detail_page_failed` in `quality_flags`. Records that can't be used at all (no ID or title) are not stored; they are counted as `rejected` with the error on the run.
 - **Finished hearings are kept.** Each portal entry is a hearing with its own "Zeitraum", whether it is still open (`AKTUELLE`) or over (`BEENDETE`), so both are read. Whether a hearing is still open shows in `raw_data`: the `listing_url` has its status, and the "Zeitraum" text has its end date.
 
@@ -76,18 +79,17 @@ docker compose ps
 uv run alembic upgrade head
 
 # 5. Verify - Tests pass
-uv run mypy . && \
-uv run pytest
+uv run mypy . && uv run pytest
 
 # 6. Verify - PostGIS is installed in both databases (expect 3.4 ... twice)
-docker compose exec db psql -U iris -d iris -c "SELECT PostGIS_Version();"
+docker compose exec db psql -U iris -d iris -c "SELECT PostGIS_Version();" && \
 docker compose exec db psql -U iris -d iris_test -c "SELECT PostGIS_Version();"
 
-# 7. Verify - alembic_version, ingest_run and signal_ingest in iris_staging
+# 7. Verify - ingest_run and signal_ingest in iris_staging
 docker compose exec db psql -U iris -d iris -c "\dt iris_staging.*"
-uv run alembic current        # expect: 001 (head)
 
-# 8. Verify - Migrations reverse cleanly
+# 8. Verify - Alembic version & migrations reverse cleanly
+uv run alembic current        # expect: 001 (head)
 uv run alembic downgrade base
 uv run alembic upgrade head
 ```
@@ -116,7 +118,7 @@ Each run gets one row in `iris_staging.ingest_run` and prints a summary line (sc
 uv run harvester report
 ```
 
-The report reads only from the database, so it can be run at any time, also after a failed run. Output after the first run (live data on 2026-10-28):
+The report reads only from the database, so it can be run at any time, also after a failed run. Output after the first run:
 
 ```
 IRIS-SIG-08 quality report
@@ -137,18 +139,21 @@ Quality flags
   none
 ```
 
-- **Latest runs:** the most recent run, from `iris_staging.ingest_run`. `city` is `all` when the run covered all configured cities.
-  - `scraped`: records read from the portal
-  - `industrial`: records that passed the industrial keyword filter
-  - `rejected`: records that couldn't be used (e.g. no ID or title)
-  - `inserted` / `updated`: new rows / existing rows rewritten
-  - `errors`: errors recorded for the run
-- **Run errors:** the latest runs' errors counted by kind, with one example message each. A failed run's message is listed as `run_failed`; the full list is in `ingest_run.errors`.
-- **Stored records:** everything in `iris_staging.signal_ingest`, from all runs, by city.
-  - `with point`: records with a geometry
-  - `unresolved`: no coordinates in the source
-  - `rejected bbox`: coordinates outside the city's bounding box or not valid numbers, so no point is stored
-- **Quality flags:** how many stored records carry each flag, e.g. `missing_publication_date` or `detail_page_failed`. The live run on 2026-10-28 had none; `tests/test_quality_report.py` shows the report with a failed run, errors and flags.
+> [!NOTE]
+> **How to read the report:** what each section and column means.
+>
+> - **Latest runs:** the most recent run, from `iris_staging.ingest_run`. `city` is `all` when the run covered all configured cities.
+>   - `scraped`: records read from the portal
+>   - `industrial`: records that passed the industrial keyword filter
+>   - `rejected`: records that couldn't be used (e.g. no ID or title)
+>   - `inserted` / `updated`: new rows / existing rows rewritten
+>   - `errors`: errors recorded for the run
+> - **Run errors:** the latest runs' errors counted by kind, with one example message each. A failed run's message is listed as `run_failed`; the full list is in `ingest_run.errors`.
+> - **Stored records:** everything in `iris_staging.signal_ingest`, from all runs, by city.
+>   - `with point`: records with a geometry
+>   - `unresolved`: no coordinates in the source
+>   - `rejected bbox`: coordinates outside the city's bounding box or not valid numbers, so no point is stored
+> - **Quality flags:** how many stored records carry each flag, e.g. `missing_publication_date` or `detail_page_failed`.
 
 ### Check the results in the database
 
@@ -202,7 +207,7 @@ docker compose down
 docker compose down -v
 ```
 
-To inspect the schema SQL without a database or `.env`: `uv run alembic upgrade head --sql`
+To inspect the schema SQL without a database: `uv run alembic upgrade head --sql`
 
 Notes:
 
@@ -283,8 +288,10 @@ iris-engg-assignment/
     test_quality_report.py          # latest run, failed run + errors, empty database
   sample_output/
     signal_ingest_sample.csv        # the 9 live records of 2026-10-28
-  plans/
-    2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md  # this file
+  docs/
+    DESIGN.md                       # design decisions, schema, upsert, filter
+    IMPLEMENTATION.md               # how each module behaves
+    TESTS.md                        # test strategy and infrastructure
   README.md
 ```
 

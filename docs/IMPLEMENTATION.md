@@ -8,8 +8,8 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
 
 `src/harvester/config.py`:
 
-- `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`, `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by `tests/test_config.py`: a password with special characters survives the URL round trip, the password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
-- `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with pydantic models, one per section. Only checks that stop a config mistake from silently producing wrong data (the "errors are visible" criterion) are included:
+- `DatabaseSettings`, a pydantic-settings model reads DB vars from `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by `tests/test_config.py`: a password with special characters survives the URL round trip, the password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
+- `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with pydantic models, one per section. Only checks that stop a config mistake from silently producing wrong data are included:
   - `extra="forbid"`: a misspelt key (e.g. `keyowrds`) fails instead of leaving the filter empty and the run "succeeding" with zero matches
   - no blank keywords: an empty one would match every title
   - `status_filters` limited to `AKTUELLE` / `BEENDETE`: a typo would skip those plans
@@ -17,7 +17,7 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
   - a bounding box for every city a source covers (else a `KeyError` after the whole scrape)
   - field types (e.g. a quoted `"2"` delay becomes `2.0`)
 
-  `HARVESTER_USER_AGENT` (environment or `.env`) overrides `scraping.user_agent`. `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`. Covered by `tests/test_config.py`.
+  `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`, so each run records the config it used; validation check 6 reads the bounding boxes from it.
 
 ## Adapter Details
 
@@ -52,49 +52,11 @@ Runs once per city in `cities` and status in `status_filters`:
 
 #### ScrapedRecord Model
 
-`src/harvester/models.py` holds `ScrapedRecord` and `NormalisedRecord`, the latter with all fields that map to the DB schema.
-
-```python
-from typing import Any
-
-from pydantic import BaseModel
-
-
-class ScrapedRecord(BaseModel):
-    source: str  # 'sachsen_portal'
-    source_record_id: str  # stable ID from the source
-    city: str  # 'dresden' | 'leipzig'
-    title: str
-    detail_url: str
-    location_text: str | None = None
-    lon: float | str | None = None  # as given by the source; checked in the pipeline
-    lat: float | str | None = None
-    zeitraum: str | None = None  # raw "Zeitraum ..." text from the detail page
-    raw_data: dict[str, Any]  # all scraped fields as-is
-```
+[`src/harvester/models.py`](../src/harvester/models.py) holds `ScrapedRecord` and `NormalisedRecord`, the latter with all fields that map to the DB schema. `ScrapedRecord` keeps values as the source gives them: `lon` / `lat` may be a string or missing, and the pipeline checks them.
 
 #### Adapter Result (`adapters/base.py`)
 
-```python
-from dataclasses import dataclass, field
-
-from harvester.models import ScrapedRecord
-
-
-@dataclass(frozen=True)
-class ScrapeError:
-    url: str
-    kind: str  # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
-    # | 'http_4xx' | 'retries_exhausted'
-    message: str
-    snippet: str | None = None  # marker JSON entry, truncated to 2 KB
-
-
-@dataclass
-class ScrapeResult:
-    records: list[ScrapedRecord] = field(default_factory=list)
-    errors: list[ScrapeError] = field(default_factory=list)
-```
+[`src/harvester/adapters/base.py`](../src/harvester/adapters/base.py) holds `ScrapeResult` (the records plus the errors) and `ScrapeError`. A `ScrapeError` has the page URL, a `kind` (`missing_id`, `missing_title`, `markers_not_found`, `count_mismatch`, `http_4xx`, `retries_exhausted`), a message and, for a bad marker, the marker JSON entry cut to 2 KB.
 
 **No adapter base class.** The adapter is a module with one entry point, `scrape(client, source, settings) -> ScrapeResult`, which the runner calls directly.
 
@@ -187,18 +149,16 @@ The brief requires dates to be verified, not assumed. What was verified ([Key Di
 
 ## Quality Report
 
-`report.py`, run as `harvester report` (also `python -m harvester report`), prints four aligned tables, from the database only:
+Run as `harvester report` (also `python -m harvester report`), prints four aligned tables, from the database with aggregated metrics only:
 
 - **Latest runs**, one row per source (`DISTINCT ON (source) … ORDER BY started_at DESC`): city (`all` when the run covered all the source's cities), status, start in UTC, scraped, industrial, rejected, inserted, updated, errors.
 - **Run errors** of those runs: count per error kind with its first message as an example, plus a failed run's message as kind `run_failed`. The full list stays in `ingest_run.errors`.
 - **Stored records** per source and city: records, with point, `unresolved`, and `rejected_out_of_bounds` ("rejected bbox"). This covers all rows, i.e. what a consumer of `signal_ingest` sees, not only the latest run's.
 - **Quality flags** per source and city.
 
-Aggregates only, each serving the acceptance criterion "errors and missing fields are visible; invalid coordinates are not silently accepted". No notes next to the numbers: the column names are the field names, and the README explains them once (with the live output). Row-level checks (e.g. filter evidence per record) belong in `sql/validation_queries.sql`.
-
 ## Validation Queries
 
-`sql/validation_queries.sql` holds 9 checks, each headed by an `\echo` so the output of `docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql` is readable. Checks marked "expect 0 rows" are violations when they return anything.
+Row level checks in `sql/validation_queries.sql` holds 9 validation queries, each headed by an `\echo` so the output of `docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql` is readable. Checks marked "expect 0" are violations when they return anything.
 
 | # | Check | Criterion it serves |
 |---|---|---|
@@ -211,8 +171,6 @@ Aggregates only, each serving the acceptance criterion "errors and missing field
 | 7 | Points in EPSG:25832 and back in WGS84 | valid staging records |
 | 8 | Each record with its run, source URL and filter evidence | traceable records; filtering |
 | 9 | Stale records: not written by the latest completed run covering their city | traceable records |
-
-Live results on 2026-10-28: the "expect 0" checks return 0 rows. Check 6 was also tested by moving one point to Berlin inside a rolled-back transaction: it returned that row.
 
 ## Sample Output
 
