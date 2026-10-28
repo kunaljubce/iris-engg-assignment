@@ -90,36 +90,7 @@ Idempotency comes from the natural key: `uq_source_record UNIQUE (source, source
 
 **Step 1: insert or overwrite.**
 
-```sql
-INSERT INTO iris_staging.signal_ingest (
-    source, source_record_id, ingest_run_id,
-    city, title, detail_url, location_text,
-    publication_date, matched_keywords,
-    geometry, geocode_status, geocode_reason, quality_flags, raw_data
-)
-VALUES (
-    ...,
-    -- WGS84 -> EPSG:25832 in PostGIS (no pyproj). NULL lon/lat (unresolved or rejected)
-    -- gives a NULL geometry; the bounding box was checked in Python before this
-    ST_Transform(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), 25832),
-    ...
-)
-ON CONFLICT (source, source_record_id) DO UPDATE SET
-    ingest_run_id    = EXCLUDED.ingest_run_id,
-    city             = EXCLUDED.city,
-    title            = EXCLUDED.title,
-    detail_url       = EXCLUDED.detail_url,
-    location_text    = EXCLUDED.location_text,
-    publication_date = EXCLUDED.publication_date,
-    matched_keywords = EXCLUDED.matched_keywords,
-    geometry         = EXCLUDED.geometry,
-    geocode_status   = EXCLUDED.geocode_status,
-    geocode_reason   = EXCLUDED.geocode_reason,
-    quality_flags    = EXCLUDED.quality_flags,
-    raw_data         = EXCLUDED.raw_data,
-    updated_at       = NOW()
-RETURNING (xmax = 0) AS inserted;
-```
+The statement is `UPSERT` in [`src/harvester/db/upsert.py`](../src/harvester/db/upsert.py): `INSERT ... ON CONFLICT ON CONSTRAINT uq_source_record DO UPDATE` rewrites every column except the key, `id` and `created_at`, and sets `updated_at = NOW()`. The point is built in the statement with `ST_Transform(ST_SetSRID(ST_MakePoint(lon, lat), 4326), 25832)`, so NULL lon/lat (unresolved or rejected) gives a NULL geometry. It ends with `RETURNING (xmax = 0) AS inserted`.
 
 **Counting:** `inserted` = rows returned with `inserted = true`; `updated` = the rest. A re-run over unchanged data therefore reports 0 inserted and N updated, with the row count and every `id` and `created_at` unchanged.
 
@@ -136,44 +107,7 @@ Plan titles are usually German compounds ("Gewerbestandort Nord", "Logistikzentr
 - **Long keywords** (Gewerbe, Industrie, Logistik, ...) match case-insensitively **anywhere inside a word**. The whole word containing the hit is kept as evidence.
 - **Short codes** (GE, GI, GVZ) match **case-sensitively as whole tokens only**. As substrings they would hit ordinary words ("gegen", "Gießen").
 
-```python
-import re
-from dataclasses import dataclass, field
-
-from harvester.config import IndustrialFilterConfig
-
-
-@dataclass(frozen=True)
-class FilterResult:
-    is_industrial: bool
-    matched_keywords: list[str] = field(default_factory=list)  # keywords as written in config
-    evidence: list[str] = field(default_factory=list)  # matched words, e.g. "Gewerbestandort"
-
-
-class IndustrialFilter:
-    def __init__(self, config: IndustrialFilterConfig) -> None:
-        # \w* on both sides captures the whole compound word around the keyword as evidence
-        self._patterns = [
-            *((kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in config.keywords),
-            *((tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in config.case_sensitive_tokens),
-        ]
-
-    def check(self, title: str) -> FilterResult:
-        keywords: list[str] = []
-        evidence: list[str] = []
-        for keyword, pattern in self._patterns:
-            hits = pattern.findall(title)
-            if hits:
-                keywords.append(keyword)
-                evidence.extend(hits)
-
-        unique = list(dict.fromkeys(keywords))
-        return FilterResult(
-            is_industrial=bool(unique),
-            matched_keywords=unique,
-            evidence=list(dict.fromkeys(evidence)),
-        )
-```
+Implemented as `IndustrialFilter` in [`src/harvester/pipeline/filter.py`](../src/harvester/pipeline/filter.py). Its `check(title)` returns a `FilterResult` with `is_industrial`, `matched_keywords` (as written in the config) and `evidence` (the matched words, e.g. "Gewerbestandort").
 
 `evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
 
