@@ -2,12 +2,17 @@
 
 ## Overview
 
-Build a Python harvester that scrapes Bauleitplan (land-use zoning) procedures from two
-Saxony citizen participation portals, filters for industrial/commercial hearings, normalises
+Build a Python harvester that scrapes Bauleitplan (land-use zoning) procedures from the
+Saxon state citizen participation portal, filters for industrial/commercial hearings, normalises
 the data, and loads it into a PostGIS-backed `iris_staging.signal_ingest` table with
 idempotent upserts and full auditability.
 
 **Scope:** Dresden and Leipzig only; surrounding districts deferred.
+
+> **Phase 6 dropped the Leipzig city register** (`www.leipzig.de`), the second source of
+> Phases 1-5: the brief names one source. The register's design is kept below, marked
+> "Dropped in Phase 6", so the reasoning stays traceable; the code, tests and fixture are
+> gone.
 
 **This is a sample solution for an exercise, not a production system.** The repo matters for
 a few weeks and is demonstrated from a fresh database. Add something only if it serves the
@@ -24,6 +29,8 @@ deployment, scale), and name it under "What We Are NOT Doing" so the omission is
 This is a greenfield repository. No existing code, schema, or configuration files.
 
 ### Key Discoveries
+
+> **Dropped in Phase 6:** Key Discoveries 3 and 8, the register half of 1, and the register column of Portal Details.
 
 All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, provenance in
 `SOURCES.md`).
@@ -113,6 +120,8 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 
 ## What We Are NOT Doing
 
+> **Dropped in Phase 6:** the Leipzig city-portal bullets (district-only rows, its detail pages, "rechtskräftig" plans, Thema) describe the removed source. Cross-source merging no longer applies.
+
 - Merging duplicate rows across sources (overlap is documented, not resolved).
 - Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 5, 8).
 - Geocoding of any kind: no online service (Nominatim, Google) and no district-centroid table.
@@ -167,6 +176,8 @@ point.
 ---
 
 ## Project Layout
+
+> **Dropped in Phase 6:** `adapters/leipzig_stadtportal.py`, `tests/test_leipzig_adapter.py` and `leipzig_stadt_listing_im_verfahren.html`.
 
 ```
 iris-engg-assignment/
@@ -242,6 +253,8 @@ iris-engg-assignment/
 ---
 
 ## Configuration (settings.yml)
+
+> **Dropped in Phase 6:** the `leipzig_stadtportal` source and `thema_signals`.
 
 ```yaml
 sources:
@@ -469,6 +482,8 @@ latest one covering its city (validation check 9 lists these).
 
 ## Industrial Keyword Filter
 
+> **Dropped in Phase 6:** the Thema match. `check(title)` reads the title only; there is no `thema:` prefix.
+
 Plan titles are usually German compounds ("Gewerbestandort Nord", "Logistikzentrum
 Radefeld", "Kleingewerbe am Bahnhof"), so whole-word matching misses most real hits.
 The filter uses two kinds of match:
@@ -536,6 +551,8 @@ while tuning the keyword list.
 ---
 
 ## Coordinates and Bounding Box
+
+> **Dropped in Phase 6:** the "Leipzig city-portal row" case; `unresolved` now only means a marker without coordinates.
 
 Only the state portal supplies coordinates (marker `latitude` / `longitude`, WGS84). The
 pipeline sets `geocode_status` per record:
@@ -605,6 +622,8 @@ in `records_rejected`); the others are still parsed.
 
 ### Leipzig City Portal Adapter (`leipzig_stadtportal.py`)
 
+> **Dropped in Phase 6:** this whole adapter. Its "load more" paging was the only pagination code; the state portal needs none (marker JSON plus the `count_mismatch` check).
+
 1. GET `{base_url}{listing_path}?tx_lepurpose[filter][89][]={status_filter_id}` (only "im
    Verfahren"; Key Discovery 8).
 2. `parse_rows(html, page_url)` for each `tr[id^="project-"]`:
@@ -627,6 +646,8 @@ in `records_rejected`); the others are still parsed.
    `unresolved` with no publication date.
 
 ### Common: ScrapedRecord Model
+
+> **Dropped in Phase 6:** `thema`; `source` is always `sachsen_portal`.
 
 ```python
 from typing import Any
@@ -687,6 +708,8 @@ class ScrapedRecord(BaseModel):
 
 ## Publication Dates
 
+> **Dropped in Phase 6:** the Leipzig city-portal bullet: every stored row now comes from the state portal.
+
 The brief requires dates to be verified, not assumed. What was verified (Key Discovery 7):
 
 - The state portal has no separate "published on" field. The detail page's "Zeitraum A bis B"
@@ -704,6 +727,8 @@ The brief requires dates to be verified, not assumed. What was verified (Key Dis
 ---
 
 ## Source Overlap Documentation
+
+> **Dropped in Phase 6:** this section and validation check 10. With one source there is no overlap.
 
 The same Leipzig Bauleitplan may appear on both the Saxon state portal and the Leipzig city
 portal, e.g. Nr. 911 "Industriegebiet am Flughafen Leipzig-Halle, 1. Änderung" (state portal,
@@ -995,6 +1020,8 @@ it as `***`, and the engine is built with `hide_parameters=True`.
 ---
 
 ## Phase 2: Adapters and HTML Parsing ✅
+
+> **Dropped in Phase 6:** the Leipzig adapter (step 5), its fixture, tests and choices.
 
 ### Overview
 
@@ -1322,6 +1349,8 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 
 ## Phase 3: Pipeline (Filter, Detail Dates, Geocode, Normalise) ✅
 
+> **Dropped in Phase 6:** the Thema filter path, the district-only geocode branch and their choices.
+
 ### Overview
 
 Turn `ScrapedRecord`s into `NormalisedRecord`s: filter (dropping non-matches), fetch the
@@ -1456,6 +1485,8 @@ Decided in this plan; confirm or update each one as the step is built.
 ---
 
 ## Phase 4: Upsert, CLI, and Integration ✅
+
+> **Dropped in Phase 6:** the register in the integration and CLI tests; the failure-path tests now use the state portal. The live counts here include the register.
 
 ### Overview
 
@@ -1598,6 +1629,8 @@ Decided in this plan; confirm or update each one as the step is built.
 ---
 
 ## Phase 5: Reporting, Validation, and Deliverables
+
+> **Dropped in Phase 6:** check 10 and the register's rows in the report output, check table, sample and README; all redone with 9 records.
 
 ### Overview
 
@@ -1961,18 +1994,30 @@ Commit: `docs(plan): record dropping the Leipzig register`
   acceptance criteria (errors visible, failed run, rollback), not register behaviour.
 - **Why keep `source` in the schema and the `sources` list in config?** No migration and
   no config reshape; the unique key and per-source runs stay correct with one source.
+- **Why a new normalise test while removing code?** The two Leipzig normalise tests were
+  the only ones showing an unresolved record without a location. They are replaced by a
+  state-portal marker with no coordinates and no address (`unresolved`, "marker has no
+  coordinates", `missing_location`), so that path is still tested.
+- **Why does the errors test now use `missing_title`?** `unexpected_status` was a
+  register-only error kind. A marker without a title is the state portal's equivalent:
+  an unusable record, counted as rejected, with its snippet in `ingest_run.errors`.
+- **What does the live data show now?** 83 scraped, 9 stored, all with a point and a
+  date, no flags. The flagged, unresolved and failed cases are shown by the tests,
+  including the quality report's.
 
 ### Success Criteria
 
 #### Automated Verification
 - [ ] `tests` workflow green on the PR
-- [ ] `grep -rniE "leipzig_stadt|stadtportal|thema" src tests config sql` finds nothing
+- [x] `grep -rniE "leipzig_stadt|stadtportal|thema" src tests config sql` finds nothing (outside the
+  saved Dresden HTML, which has the portal's own "Thema" filter)
+- [x] `ruff check .`, `ruff format --check .`, `mypy .`, `pytest` pass locally (81 tests, 2026-10-28)
 
 #### Manual Verification
-- [ ] Live run: 9 records (Dresden 7, Leipzig 2), all with a point and a date
-- [ ] Re-run: 0 inserted, 9 updated, still 9 records
-- [ ] Validation checks 1-9 give the README's expected results
-- [ ] Sample CSV has 9 rows
+- [x] Live run: 9 records (Dresden 7, Leipzig 2), all with a point and a date (2026-10-28)
+- [x] Re-run: 0 inserted, 9 updated, still 9 records
+- [x] Validation checks 1-9 give the README's expected results
+- [x] Sample CSV has 9 rows
 
 **Checkpoint:** PR reviewed and squash-merged.
 
