@@ -80,6 +80,7 @@ from dataclasses import dataclass, field
 
 from harvester.models import ScrapedRecord
 
+
 @dataclass(frozen=True)
 class ScrapeError:
     url: str
@@ -87,6 +88,7 @@ class ScrapeError:
     # | 'http_4xx' | 'retries_exhausted'
     message: str
     snippet: str | None = None  # marker JSON entry, truncated to 2 KB
+
 
 @dataclass
 class ScrapeResult:
