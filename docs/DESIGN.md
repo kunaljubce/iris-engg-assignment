@@ -1,19 +1,15 @@
 ## Implementation Approach
 
-One adapter, `sachsen_portal.py`, runs once per city and status and produces `ScrapedRecord`s. It fetches pages with one shared `httpx.Client` and parses them with BeautifulSoup. Parsing functions take an HTML string and return data, so tests feed them fixture files directly. A shared pipeline applies the industrial keyword filter, fetches the detail page of each match for its publication date, checks coordinates against the city bounding box, and upserts into PostGIS, where `ST_Transform` produces the EPSG:25832 point.
+One adapter, `sachsen_portal.py`, runs once per city and status and produces `ScrapedRecord`s. It fetches pages with one shared `httpx.Client` and parses them with BeautifulSoup. Parsing functions take an HTML string and return data, so tests can call them directly on the text of a fixture file. A shared pipeline applies the industrial keyword filter, fetches the detail page of each match for its publication date, checks coordinates against the city bounding box, and upserts into PostGIS, where `ST_Transform` produces the EPSG:25832 point.
 
 **Sync throughout.** The harvester is a sequential, deliberately throttled crawler, so it uses:
 - a sync `httpx.Client`
 - a sync SQLAlchemy `Engine` / `Session` with psycopg 3
 - plain synchronous pytest tests (no `pytest-asyncio`)
 
-`uv.lock` and `.python-version` (3.12) are committed, so every checkout resolves the same interpreter and package versions.
-
 ## Key Discoveries
 
-All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, provenance in `SOURCES.md`).
-
-1. **One portal, server-rendered, and everything needed is a plain GET.** Dresden and Leipzig are both on the Saxon state portal (`buergerbeteiligung.sachsen.de`, PrimeFaces). No browser automation is needed: `httpx` + BeautifulSoup.
+1. **One portal, server-rendered, and everything needed is a plain GET.** Dresden and Leipzig are both on the Saxon state portal (`buergerbeteiligung.sachsen.de`). No browser automation is needed: `httpx` + BeautifulSoup.
 
 2. **The state portal embeds per-procedure coordinates.** Each listing contains an OpenLayers call `map.drawMarkers([...])` whose JSON array has one entry per result, **across all pages**: `id`, `kategorie` (the title, HTML-escaped), `href`, `latitude`, `longitude` (WGS84), `adresse` (street address). All 83 markers captured have coordinates inside the city bounding boxes. Geometry comes from the source, not from a lookup table.
 
@@ -38,25 +34,6 @@ All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, pr
 | Coordinates | marker `latitude` / `longitude` (WGS84) |
 | Publication date | detail page `li.nbp-statistik--laufzeit`, start date |
 | Items (2026-10-27) | Dresden 8 current + 52 finished; Leipzig 2 current + 21 finished |
-
-## What We Are NOT Doing
-
-- Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 4).
-- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply coordinates; a marker without them is stored `unresolved` with the reason.
-- Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
-- Matching keywords in descriptions. The filter reads titles: plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for matches, for the publication date.
-- Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
-- Downloading or parsing PDF plan documents.
-- Building a web UI or API layer.
-- Handling BundID authentication (public pages only).
-- Production hardening (see the scope note in the [plan's Overview](2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md#overview)). For example, no SQLAlchemy `naming_convention`: it only pays off when later migrations alter or drop constraints by name, and this repo is expected to have the single migration `001`. Constraints and indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
-- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the `db`-marked tests run every query against it.
-- Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
-- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
-- Storing non-industrial records. The objective is to *filter*; non-matches are only counted (`records_filtered_out`). `--dry-run` prints every record with its filter decision for tuning the keyword list.
-- Columns the brief doesn't ask for (plan type, plan number, procedure step, status, participation end date). They are kept as scraped in `raw_data`.
-- Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
-- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an older `ingest_run_id` (validation check 9).
 
 ## Database Schema
 
@@ -103,7 +80,6 @@ The statement is `UPSERT` in [`src/harvester/db/upsert.py`](../src/harvester/db/
 ## Industrial Keyword Filter
 
 Plan titles are usually German compounds ("Gewerbestandort Nord", "Logistikzentrum Radefeld", "Kleingewerbe am Bahnhof"), so whole-word matching misses most real hits. The filter uses two kinds of match:
-
 - **Long keywords** (Gewerbe, Industrie, Logistik, ...) match case-insensitively **anywhere inside a word**. The whole word containing the hit is kept as evidence.
 - **Short codes** (GE, GI, GVZ) match **case-sensitively as whole tokens only**. As substrings they would hit ordinary words ("gegen", "Gießen").
 
@@ -111,7 +87,7 @@ Implemented as `IndustrialFilter` in [`src/harvester/pipeline/filter.py`](../src
 
 `evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
 
-Only the title is read; see [What We Are NOT Doing](#what-we-are-not-doing) for why not descriptions. The filter runs on listing data, **before** any detail page is fetched, so only matches cost an extra request. Only records with `is_industrial = True` are stored; `matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its filter decision, so false negatives can be checked while tuning the keyword list.
+The filter runs on listing data, **before** any detail page is fetched, so only matches cost an extra request. Only records with `is_industrial = True` are stored; `matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its filter decision, so false negatives can be checked while tuning the keyword list.
 
 ## Performance Considerations
 
@@ -119,3 +95,17 @@ Only the title is read; see [What We Are NOT Doing](#what-we-are-not-doing) for 
 - **Database:** Small table (<1000 rows, only industrial matches). No indexes beyond the primary key and `uq_source_record`; see [Database Schema](#database-schema).
 - **Memory:** HTML pages are small (<700 KB each). No memory concerns.
 - **HTTP:** one `httpx.Client` reused for every request (connection reuse).
+
+## What We Are NOT Doing
+
+- Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 4).
+- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply coordinates; a marker without them is stored `unresolved` with the reason.
+- Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
+- Matching keywords in descriptions. The filter reads titles: plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for matches, for the publication date.
+- Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
+- Production hardening (see the scope note in the [plan's Overview](2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md#overview)). For example, no SQLAlchemy `naming_convention`: it only pays off when later migrations alter or drop constraints by name, and this repo is expected to have the single migration `001`. Constraints and indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
+- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the `db`-marked tests run every query against it.
+- Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
+- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
+- Columns the brief doesn't ask for (plan type, plan number, procedure step, status, participation end date). They are kept as scraped in `raw_data`.
+- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an older `ingest_run_id` (validation check 9).
