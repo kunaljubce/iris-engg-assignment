@@ -20,17 +20,16 @@
   - A session-scoped fixture runs `alembic upgrade head` against `iris_test`.
   - Each test starts by emptying both tables (`TRUNCATE`). Not a rolled-back transaction: `run_source` commits the run row and the upsert separately on purpose, so a test can't hold them in one outer transaction.
   - Tests marked `db` are **skipped with an explicit reason** if the database settings can't be loaded (no `POSTGRES_PASSWORD` in the environment or `.env`). If they load but the database is unreachable, the tests **fail**: configured-but-broken is an error, not a skip. The non-DB suite (parsing, filter, normalise, geocode, fetch) runs with no Docker.
+    - `test_upsert.py`: a re-run inserts nothing and keeps each row's `id` and `created_at`; a key repeated in one batch is written once and reported.
+    - `test_pipeline_integration.py`: the whole run from fixtures to the database; running it twice leaves the same rows; an unreachable source gives a `failed` run; a crash after the upsert leaves no records.
+    - `test_bounding_box.py`: points outside the box are stored without geometry; the EPSG:25832 transform matches pyproj within 1 m.
+    - `test_quality_report.py`: the report's tables. 3 db tests:
+      - the latest run per source is shown (not an older one) with its UTC start and counts; stored records by city with point and geocode counts, and flag counts
+      - a failed run shows its failure as `run_failed` and its errors counted by kind, with an example message
+      - an empty database prints every section with "no runs yet" / "none" instead of failing
+- `uv run pytest` runs all tests. The scrapers are tested against real pages through httpx's mock transport, so no test touches the network. Edge cases (empty listing, malformed markers, HTTP errors, count mismatch) are small HTML snippets inside the tests. `test_fetch.py` covers the retries: 5xx, 429 with `Retry-After` and timeouts are retried, 404 is not.
+- CI (`.github/workflows/ci.yml`) runs ruff, mypy, the migrations up / down / up and all tests against a PostGIS 16-3.4 service on every pull request to `main` and every push to `main`. The badge at the top of the README shows the result on `main`; it only renders while the repository is public.
 
-#### `tests/test_quality_report.py`
-
-3 db tests:
-- the latest run per source is shown (not an older one) with its UTC start and counts; stored records by city with point and geocode counts, and flag counts
-- a failed run shows its failure as `run_failed` and its errors counted by kind, with an example message
-- an empty database prints every section with "no runs yet" / "none" instead of failing
-
-Rows are compared with whitespace collapsed, so the tests don't depend on column widths.
-
-The tests set `started_at` explicitly: `NOW()` is the transaction start, so every run made in one test transaction would otherwise have the same time.
 
 #### `tests/conftest.py`
 

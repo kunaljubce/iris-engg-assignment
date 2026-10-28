@@ -2,12 +2,9 @@
 
 [![tests](https://github.com/kunaljubce/iris-engg-assignment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunaljubce/iris-engg-assignment/actions/workflows/ci.yml)
 
-IRIS-SIG-08: harvest land-use plan hearings (Bauleitplanverfahren) for Dresden and
-Leipzig, keep the industrial ones, and load them into `iris_staging.signal_ingest`
-(PostgreSQL 16 / PostGIS 3.4) with EPSG:25832 points.
+IRIS-SIG-08: harvest land-use plan hearings (Bauleitplanverfahren) for Dresden and Leipzig, keep the industrial ones, and load them into `iris_staging.signal_ingest` (PostgreSQL 16 / PostGIS 3.4) with EPSG:25832 points.
 
-**How it works.** Each run: scrape → filter → normalise → upsert, tracked in
-`iris_staging.ingest_run`.
+**How it works.** Each run: scrape → filter → normalise → upsert, tracked in `iris_staging.ingest_run`.
 
 | Step | Code | What it does |
 |---|---|---|
@@ -20,11 +17,7 @@ Leipzig, keep the industrial ones, and load them into `iris_staging.signal_inges
 
 ## Data source
 
-The Saxon state participation portal, `buergerbeteiligung.sachsen.de` (the source named
-in the brief). It is a public site, read with plain HTTP GET requests: no login, no
-browser, no API key. Checked live on 2026-10-27 and 2026-10-28; the saved pages and their
-URLs are in `tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and
-timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
+The Saxon state participation portal, `buergerbeteiligung.sachsen.de` (the source named in the brief). It is a public site, read with plain HTTP GET requests: no login, no browser, no API key. Checked live on 2026-10-27 and 2026-10-28; the saved pages and their URLs are in `tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
 
 | | |
 |---|---|
@@ -48,34 +41,19 @@ timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
 | `matched_keywords` | keywords found in the title |
 | `raw_data` | marker, listing URL, raw "Zeitraum" text, filter evidence |
 
-- **Industrial means:** the title contains one of the keywords in `config/settings.yml`
-  (e.g. Gewerbe, Industrie, Logistik, Gewerbepark), case-insensitively and also inside
-  compound words (Gewerbecampus). The short codes GE, GI and GVZ match only as whole,
-  upper-case words. Only matches are stored; the rest are counted as `filtered out` on
-  the run.
-- **Publication date = start of the "Zeitraum".** The portal has no "published on"
-  field. The detail page's "Zeitraum 12.10.2026 bis 13.11.2026" is the period the draft is
-  publicly displayed (BauGB § 3 (2)), so its start date is used. The raw text is kept in
-  `raw_data`.
-- **The marker coordinates are the plan's location.** They are WGS84 and checked against
-  the city's bounding box in `settings.yml`. Outside the box, or not a number:
-  `rejected_out_of_bounds` with no point, the raw values kept in `raw_data`. Missing:
-  `unresolved`. Inside: transformed to EPSG:25832 by PostGIS (`source_coordinates`).
-- **A record that couldn't be read completely is still stored, flagged:** e.g.
-  `missing_publication_date` or `detail_page_failed` in `quality_flags`. Records that
-  can't be used at all (no ID or title) are not stored; they are counted as `rejected`
-  with the error on the run.
-- **Finished hearings are kept.** Each portal entry is a hearing with its own
-  "Zeitraum", whether it is still open (`AKTUELLE`) or over (`BEENDETE`), so both are
-  read. Whether a hearing is still open shows in `raw_data`: the `listing_url` has its
-  status, and the "Zeitraum" text has its end date.
+- **Industrial means:** the title contains one of the keywords in `config/settings.yml` (e.g. Gewerbe, Industrie, Logistik, Gewerbepark), case-insensitively and also inside compound words (Gewerbecampus). The short codes GE, GI and GVZ match only as whole, upper-case words. Only matches are stored; the rest are counted as `filtered out` on the run.
+- **Publication date = start of the "Zeitraum".** The portal has no "published on" field. The detail page's "Zeitraum 12.10.2026 bis 13.11.2026" is the period the draft is publicly displayed (BauGB § 3 (2)), so its start date is used. The raw text is kept in `raw_data`.
+- **The marker coordinates are the plan's location.** They are WGS84 and checked against the city's bounding box in `settings.yml`. 
+  - Outside the box, or not a number: `rejected_out_of_bounds` with no point, the raw values kept in `raw_data`. 
+  - Missing: `unresolved`. Inside: transformed to EPSG:25832 by PostGIS (`source_coordinates`).
+- **A record that couldn't be read completely is still stored, flagged:** e.g. `missing_publication_date` or `detail_page_failed` in `quality_flags`. Records that can't be used at all (no ID or title) are not stored; they are counted as `rejected` with the error on the run.
+- **Finished hearings are kept.** Each portal entry is a hearing with its own "Zeitraum", whether it is still open (`AKTUELLE`) or over (`BEENDETE`), so both are read. Whether a hearing is still open shows in `raw_data`: the `listing_url` has its status, and the "Zeitraum" text has its end date.
 
 ## Setup
 
 ### Prerequisites
 
-- [uv](https://docs.astral.sh/uv/). It installs the pinned Python version (3.12, from
-  `.python-version`) and all dependencies.
+- [uv](https://docs.astral.sh/uv/) installs all dependencies, on top of the pinned Python version.
 - Docker with Docker Compose, for the local PostgreSQL 16 / PostGIS 3.4 database.
 
 ### Steps (with verifications to test everything works)
@@ -114,9 +92,7 @@ uv run alembic downgrade base
 uv run alembic upgrade head
 ```
 
-The database tests (marked `db`) run against `iris_test`. Without the database settings
-in `.env` they are skipped, and if the settings are there but the database can't be
-reached they fail.
+The database tests (marked `db`) run against `iris_test`. Without the database settings in `.env` they are skipped, and if the settings are there but the database can't be reached they fail.
 
 ## Run the harvester
 
@@ -131,10 +107,7 @@ uv run harvester run
 uv run harvester run --city dresden
 ```
 
-Each run gets one row in `iris_staging.ingest_run` and prints a summary line (scraped,
-filtered out, rejected, inserted, updated, errors). The command exits with code 1 if the
-run failed. Re-running is safe: records are upserted on
-`(source, source_record_id)`, so a second run updates rows and adds none.
+Each run gets one row in `iris_staging.ingest_run` and prints a summary line (scraped, filtered out, rejected, inserted, updated, errors). The command exits with code 1 if the run failed. Re-running is safe: records are upserted on `(source, source_record_id)`, so a second run updates rows and adds none.
 
 ### Quality report
 
@@ -143,8 +116,7 @@ run failed. Re-running is safe: records are upserted on
 uv run harvester report
 ```
 
-The report reads only from the database, so it can be run at any time, also after a
-failed run. Output after the first run (live data on 2026-10-28):
+The report reads only from the database, so it can be run at any time, also after a failed run. Output after the first run (live data on 2026-10-28):
 
 ```
 IRIS-SIG-08 quality report
@@ -165,26 +137,18 @@ Quality flags
   none
 ```
 
-- **Latest runs:** the most recent run, from `iris_staging.ingest_run`. `city` is `all`
-  when the run covered all configured cities.
+- **Latest runs:** the most recent run, from `iris_staging.ingest_run`. `city` is `all` when the run covered all configured cities.
   - `scraped`: records read from the portal
   - `industrial`: records that passed the industrial keyword filter
   - `rejected`: records that couldn't be used (e.g. no ID or title)
   - `inserted` / `updated`: new rows / existing rows rewritten
   - `errors`: errors recorded for the run
-- **Run errors:** the latest runs' errors counted by kind, with one example message each.
-  A failed run's message is listed as `run_failed`; the full list is in
-  `ingest_run.errors`.
-- **Stored records:** everything in `iris_staging.signal_ingest`, from all runs, by
-  city.
+- **Run errors:** the latest runs' errors counted by kind, with one example message each. A failed run's message is listed as `run_failed`; the full list is in `ingest_run.errors`.
+- **Stored records:** everything in `iris_staging.signal_ingest`, from all runs, by city.
   - `with point`: records with a geometry
   - `unresolved`: no coordinates in the source
-  - `rejected bbox`: coordinates outside the city's bounding box or not valid numbers, so
-    no point is stored
-- **Quality flags:** how many stored records carry each flag, e.g.
-  `missing_publication_date` or `detail_page_failed`. The live run on 2026-10-28 had
-  none; `tests/test_quality_report.py` shows the report with a failed run, errors and
-  flags.
+  - `rejected bbox`: coordinates outside the city's bounding box or not valid numbers, so no point is stored
+- **Quality flags:** how many stored records carry each flag, e.g. `missing_publication_date` or `detail_page_failed`. The live run on 2026-10-28 had none; `tests/test_quality_report.py` shows the report with a failed run, errors and flags.
 
 ### Check the results in the database
 
@@ -206,20 +170,13 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 | 8 | Each record with its run, source URL and filter evidence | 9 rows |
 | 9 | Records not written by the latest run covering their city | 0 rows |
 
-Duplicate keys and a point without `source_coordinates` aren't checked here: the
-database's constraints make them impossible. To check idempotency, run
-`uv run harvester run` again: check 1 should show 0 inserted and 9 updated, and the
-record count should stay at 9.
+Duplicate keys and a point without `source_coordinates` aren't checked here: the database's constraints make them impossible. To check idempotency, run `uv run harvester run` again: check 1 should show 0 inserted and 9 updated, and the record count should stay at 9.
 
 To run a single query, open a SQL shell with `docker compose exec db psql -U iris -d iris`.
 
 ### Sample output
 
-`sample_output/signal_ingest_sample.csv` holds all 9 records from the live run on
-2026-10-28, with every column of `signal_ingest`. The geometry is given as `x_25832` /
-`y_25832` (EPSG:25832, as stored) and `lon` / `lat` (WGS84). It's public-source data:
-`raw_data` keeps only what the portal publishes (marker, listing URL, Zeitraum, filter
-evidence), with no personal details, so nothing needed anonymizing.
+`sample_output/signal_ingest_sample.csv` holds all 9 records from the live run on 2026-10-28, with every column of `signal_ingest`. The geometry is given as `x_25832`/`y_25832` (EPSG:25832, as stored) and `lon` / `lat` (WGS84). It's public-source data: `raw_data` keeps only what the portal publishes (marker, listing URL, Zeitraum, filter evidence), with no personal details, so nothing needed anonymizing.
 
 To regenerate it from your database:
 
@@ -255,58 +212,87 @@ Notes:
 
 ## Configuration
 
-- **`config/settings.yml`** (no secrets, checked in): the sources and their cities, the
-  request delay, retries and timeout, the industrial keywords, and a WGS84 bounding box
-  per city. It is validated on load: an unknown key, an inverted box, or a city without a
-  box stops the run with a clear error.
-- **`.env`** (gitignored, from `.env.example`): the `POSTGRES_*` connection settings, and
-  optionally `HARVESTER_USER_AGENT` to add an operator contact to the user agent.
+- **`config/settings.yml`** (no secrets, checked in): the sources and their cities, the request delay, retries and timeout, the industrial keywords, and a WGS84 bounding box per city. It is validated on load: an unknown key, an inverted box, or a city without a box stops the run with a clear error.
+- **`.env`** (gitignored, from `.env.example`): the `POSTGRES_*` connection settings, and optionally `HARVESTER_USER_AGENT` to add an operator contact to the user agent.
 
-To add a city that is on the state portal, add its portal slug under `cities` and its
-box under `bounding_boxes`; no code changes. Each run stores the config it used in
-`ingest_run.config_snapshot`.
+To add a city that is on the state portal, add its portal slug under `cities` and its box under `bounding_boxes`; no code changes. Each run stores the config it used in `ingest_run.config_snapshot`.
 
-## Tests
 
-`uv run pytest` runs all tests. The scrapers are tested against real pages through httpx's mock
-transport, so no test touches the network. Edge cases (empty listing, malformed markers,
-HTTP errors, count mismatch) are small HTML snippets inside the tests. `test_fetch.py` covers
-the retries: 5xx, 429 with `Retry-After` and timeouts are retried, 404 is not.
+## Project Layout
 
-The `db` tests run against `iris_test`:
-
-- `test_upsert.py`: a re-run inserts nothing and keeps each row's `id` and
-  `created_at`; a key repeated in one batch is written once and reported.
-- `test_pipeline_integration.py`: the whole run from fixtures to the database; running it
-  twice leaves the same rows; an unreachable source gives a `failed` run; a crash after
-  the upsert leaves no records.
-- `test_bounding_box.py`: points outside the box are stored without geometry; the
-  EPSG:25832 transform matches pyproj within 1 m.
-- `test_quality_report.py`: the report's tables.
-
-CI (`.github/workflows/ci.yml`) runs ruff, mypy, the migrations up / down / up and all
-tests against a PostGIS 16-3.4 service on every pull request to `main` and every push to
-`main`. The badge at the top shows the result on `main`; it only renders while the
-repository is public.
+```
+iris-engg-assignment/
+  pyproject.toml                    # project metadata, dependencies, tool config
+  alembic.ini                       # Alembic config (no URL; env.py uses DatabaseSettings)
+  docker-compose.yml                # postgis/postgis:16-3.4, credentials from .env
+  docker/
+    initdb/
+      20_create_test_db.sql         # creates iris_test database + postgis extension
+  .env.example                      # placeholders only (no secrets committed)
+  config/
+    settings.yml                   # source and cities, keyword list, bounding boxes
+  migrations/
+    env.py
+    versions/
+      001_create_schema_and_tables.py
+  src/
+    harvester/
+      __init__.py
+      __main__.py                   # `python -m harvester`: calls cli.main()
+      cli.py                        # click CLI; `harvester` console script (pyproject)
+      runner.py                     # run_source(): one source end to end, tracked in ingest_run
+      report.py                     # quality report from ingest_run + signal_ingest
+      config.py                     # pydantic-settings: POSTGRES_* -> DB URL; settings.yml
+      models.py                     # ScrapedRecord, NormalisedRecord
+      db/
+        __init__.py
+        engine.py                   # SQLAlchemy engine from DatabaseSettings().url
+        upsert.py                   # INSERT ... ON CONFLICT (source, source_record_id)
+      adapters/
+        __init__.py
+        base.py                     # ScrapeResult, ScrapeError (no adapter class hierarchy)
+        fetch.py                    # fetch(): httpx GET with retries, status checks, polite delay
+        sachsen_portal.py           # state portal: marker JSON + detail page (Dresden + Leipzig)
+      pipeline/
+        __init__.py
+        normalise.py                # ScrapedRecord -> NormalisedRecord, date parsing, quality flags
+        filter.py                   # industrial keyword matcher
+        geocode.py                  # bounding-box check of source coordinates
+  .github/
+    workflows/
+      ci.yml                        # ruff, mypy, migrations, all tests on PRs and pushes to main
+  sql/
+    validation_queries.sql          # post-ingest verification
+  tests/
+    __init__.py
+    conftest.py                     # fixture loader, httpx MockTransport, DB fixtures
+    db_helpers.py                   # record / run builders for the db tests
+    fixtures/
+      SOURCES.md                    # provenance: source URL + capture date per fixture
+      sachsen_dresden_listing_beendet.html     # marker JSON, "von 52"
+      sachsen_dresden_detail.html              # "Zeitraum"
+    test_sachsen_adapter.py
+    test_fetch.py                   # retry on 5xx/429/timeouts, no retry on 4xx
+    test_normalise.py
+    test_filter.py
+    test_geocode.py
+    test_upsert.py                  # includes re-run idempotency + duplicate tests
+    test_bounding_box.py            # out-of-bounds rejection + ST_Transform, against PostGIS
+    test_pipeline_integration.py    # run_source over fixtures: counts, re-run, errors, crash
+    test_cli.py                     # source/city selection, --dry-run without a database
+    test_quality_report.py          # latest run, failed run + errors, empty database
+  sample_output/
+    signal_ingest_sample.csv        # the 9 live records of 2026-10-28
+  plans/
+    2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md  # this file
+  README.md
+```
 
 ## Known limitations
 
-- **Only the two cities are covered.** "Around Dresden and Leipzig" is read as the cities
-  themselves: the state portal's Dresden and Leipzig listings. Hearings run by
-  surrounding municipalities or districts (e.g. Meißen, Nordsachsen) are not read. Any
-  that publish on the state portal can be added as a `cities` entry plus a bounding box
-  in `settings.yml`, with no code changes.
-- **The portal lists only what a city publishes there.** Leipzig has 23 procedures on it;
-  on 2026-10-28 the two industrial ones are both finished, so there is no open Leipzig
-  hearing in the data.
-- **The filter reads titles only.** A plan whose title names a place but not the use
-  (e.g. "Bebauungsplan Nr. 422 Radefelder Allee West") is missed. Descriptions are not
-  read, because they mention "Gewerbe" in passing and would add false positives.
-- **EPSG:25832 is used outside its zone.** It covers 6–12° E; Leipzig (~12.4° E) and
-  Dresden (~13.7° E) lie in the zone of EPSG:25833. The brief requires 25832, so points are
-  correct but have growing scale distortion to the east.
-- **The scraper depends on the portal's markup,** above all the `drawMarkers` call. A
-  change shows as errors on the run (`markers_not_found`, `count_mismatch`) or a `failed`
-  run, not as a silently empty result.
-- **Rows are never deleted.** A plan that leaves the portal stays in the table;
-  validation check 9 lists rows the latest run covering their city didn't write.
+- **Only the two cities are covered.** "Around Dresden and Leipzig" is read as the cities themselves: the state portal's Dresden and Leipzig listings. Hearings run by surrounding municipalities or districts (e.g. Meißen, Nordsachsen) are not read. Any that publish on the state portal can be added as a `cities` entry plus a bounding box in `settings.yml`, with no code changes.
+- **The portal lists only what a city publishes there.** Leipzig has 23 procedures on it; on 2026-10-28 the two industrial ones are both finished, so there is no open Leipzig hearing in the data.
+- **The filter reads titles only.** A plan whose title names a place but not the use (e.g. "Bebauungsplan Nr. 422 Radefelder Allee West") is missed. Descriptions are not read, because they mention "Gewerbe" in passing and would add false positives.
+- **EPSG:25832 is used outside its zone.** It covers 6–12° E; Leipzig (~12.4° E) and Dresden (~13.7° E) lie in the zone of EPSG:25833. The brief requires 25832, so points are correct but have growing scale distortion to the east.
+- **The scraper depends on the portal's markup,** above all the `drawMarkers` call. A change shows as errors on the run (`markers_not_found`, `count_mismatch`) or a `failed` run, not as a silently empty result.
+- **Rows are never deleted.** A plan that leaves the portal stays in the table; validation check 9 lists rows the latest run covering their city didn't write.
