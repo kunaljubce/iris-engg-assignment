@@ -477,37 +477,37 @@ The filter uses two kinds of match:
 import re
 from dataclasses import dataclass, field
 
+from harvester.config import IndustrialFilterConfig
+
+# Marks a Leipzig Thema match in matched_keywords, e.g. "thema:Gewerbe"
+THEMA_PREFIX = "thema:"
+
 
 @dataclass(frozen=True)
 class FilterResult:
     is_industrial: bool
-    matched_keywords: list[str] = field(default_factory=list)  # canonical keywords from config
-    evidence: list[str] = field(default_factory=list)  # matched words, e.g. 'Gewerbestandort'
+    matched_keywords: list[str] = field(default_factory=list)  # keywords as written in config
+    evidence: list[str] = field(default_factory=list)  # matched words, e.g. "Gewerbestandort"
 
 
 class IndustrialFilter:
-    def __init__(self, keywords: list[str], case_sensitive_tokens: list[str],
-                 thema_signals: list[str]) -> None:
-        # \w* on both sides captures the full compound word around the keyword
-        self._ci = [(kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in keywords]
-        self._cs = [(tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in case_sensitive_tokens]
-        self._thema = set(thema_signals)
-
-    def _scan(self, text: str) -> tuple[list[str], list[str]]:
-        keywords: list[str] = []
-        evidence: list[str] = []
-        for kw, pattern in [*self._ci, *self._cs]:
-            hits = [m.group() for m in pattern.finditer(text)]
-            if hits:
-                keywords.append(kw)
-                evidence.extend(hits)
-        return keywords, evidence
+    def __init__(self, config: IndustrialFilterConfig) -> None:
+        # \w* on both sides captures the whole compound word around the keyword as evidence
+        self._patterns = [
+            *((kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in config.keywords),
+            *((tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in config.case_sensitive_tokens),
+        ]
+        self._thema_signals = set(config.thema_signals)
 
     def check(self, title: str, thema: list[str]) -> FilterResult:
         # A Leipzig row can carry several Thema values ("Wohnen", "Gewerbe", ...)
-        keywords = [f"thema:{t}" for t in thema if t in self._thema]
-        kws, evidence = self._scan(title)
-        keywords.extend(kws)
+        keywords = [f"{THEMA_PREFIX}{t}" for t in thema if t in self._thema_signals]
+        evidence: list[str] = []
+        for keyword, pattern in self._patterns:
+            hits = pattern.findall(title)
+            if hits:
+                keywords.append(keyword)
+                evidence.extend(hits)
 
         unique = list(dict.fromkeys(keywords))
         return FilterResult(
@@ -1322,9 +1322,10 @@ state-portal detail page of each match, parse the date, check the coordinates.
 
 ### Changes Required
 
-#### 1. `src/harvester/pipeline/filter.py`
+#### 1. `src/harvester/pipeline/filter.py` ✅
 
-Industrial keyword filter as specified above. Loads keywords from config.
+Industrial keyword filter as specified above. `IndustrialFilter(config.industrial_filter)`
+takes the validated config section directly.
 
 #### 2. `src/harvester/pipeline/geocode.py`
 
@@ -1376,6 +1377,18 @@ def test_non_industrial_records_dropped_and_counted():
 
 Decided in this plan; confirm or update each one as the step is built.
 
+- **Why does the filter run before the detail page is fetched?** Only matches cost a second
+  request: on the Dresden fixture 5 of 52 records, instead of all 52. (Step 1, built)
+- **Why a Thema match as well as the title?** Leipzig titles often name only a street ("Weheweg");
+  the city's own "Gewerbe" tag catches those. It also lets in mixed areas (Nr. 456
+  Alfred-Kunze-Sportpark); the `thema:` prefix in `matched_keywords` shows which rows came in
+  that way, so they can be reviewed. (Step 1, built)
+- **What does the filter miss?** Plans whose title and Thema say nothing industrial (Nr. 422
+  Radefelder Allee West). Reading descriptions would catch them but adds false positives; see
+  "What We Are NOT Doing". (Step 1, checked on the fixtures)
+- **Why do some rows list both "Gewerbegebiet" and "Gewerbe"?** Long keywords match inside words,
+  so the general one hits too. Which rows are stored only depends on whether anything matched.
+  (Step 1, built)
 - **Why match on the title (and Leipzig Thema) only, not descriptions?** Descriptions mention
   neighbouring commercial areas and produce false positives.
 - **Why substring matching for long keywords but whole tokens for GE/GI/GVZ?** German compounds
