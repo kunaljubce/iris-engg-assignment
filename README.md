@@ -59,6 +59,29 @@ uv run alembic downgrade base
 uv run alembic upgrade head
 ```
 
+The database tests (marked `db`) run against `iris_test`. Without the database settings
+in `.env` they are skipped, and if the settings are there but the database can't be
+reached they fail.
+
+## Run the harvester
+
+```bash
+# Scrape, filter and print what would be kept (KEEP) or dropped (-); writes nothing
+uv run harvester run --dry-run
+
+# Harvest all sources into iris_staging.signal_ingest
+uv run harvester run
+
+# One source or one city only (names as in config/settings.yml)
+uv run harvester run --source leipzig_stadtportal
+uv run harvester run --city dresden
+```
+
+Each source gets one row in `iris_staging.ingest_run`, and the run prints one summary
+line per source (scraped, filtered out, rejected, inserted, updated, errors). The command
+exits with code 1 if any run failed. Re-running is safe: records are upserted on
+`(source, source_record_id)`, so a second run updates rows and adds none.
+
 ### Stop or reset the database
 
 ```bash
