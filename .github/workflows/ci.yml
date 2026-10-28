@@ -1,10 +1,17 @@
-# Lint, type checks, migrations and the full test suite (unit + db-marked) on every push to
-# main. The README badge shows this workflow's latest result on main.
+# Lint, type checks, migrations and the full test suite (unit + db-marked) on every pull
+# request to main and every push to main. The README badge shows the latest result on main.
 name: tests
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
+
+# A new push to a PR branch cancels that branch's older, still running check
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   tests:

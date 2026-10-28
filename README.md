@@ -305,8 +305,9 @@ The `db` tests run against `iris_test`:
 - `test_quality_report.py`: the report's tables.
 
 CI (`.github/workflows/ci.yml`) runs ruff, mypy, the migrations up / down / up and all
-tests against a PostGIS 16-3.4 service on every push to `main`. The badge at the top
-shows the result; it only renders while the repository is public.
+tests against a PostGIS 16-3.4 service on every pull request to `main` and every push to
+`main`. The badge at the top shows the result on `main`; it only renders while the
+repository is public.
 
 ## Known limitations
 

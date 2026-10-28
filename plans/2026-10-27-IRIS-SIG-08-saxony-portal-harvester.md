@@ -1828,6 +1828,156 @@ Decided in this plan; confirm or update each one as the step is built.
 
 ---
 
+## Phase 6: Drop the Leipzig City Register
+
+### Overview
+
+The brief names one source, `buergerbeteiligung.sachsen.de`; the Leipzig register was
+added for coverage, not because the brief asked for it. Dropping it leaves the schema,
+the migration and the pipeline shape unchanged and removes an adapter, the Thema filter
+path and the district-only geocode branch. Result (live 2026-10-28): 9 records, Dresden 7
+and Leipzig 2, all with a point and a publication date.
+
+What is given up, and the answer to have ready:
+- **The only pagination code.** The state portal pages its cards, but the marker JSON
+  lists every result; the "von N" count is checked against it (`count_mismatch`), so a
+  missing page would show as an error.
+- **Live unresolved rows.** Every stored row has a point; the unresolved, rejected and
+  missing-date paths are shown by the tests (marker without coordinates, out-of-bounds
+  marker, detail page without a Zeitraum).
+
+### Working Rules
+
+- Branch `feature/drop-leipzig-register` from `main`, **after** the PR trigger in
+  `.github/workflows/ci.yml` is on `main`.
+- One commit per step below. Each step leaves `ruff`, `mypy` and `pytest` green, so the
+  branch can be stopped or bisected at any commit.
+- Open the PR early; the `tests` workflow runs on every push to it. Squash-merge only
+  after it is green and reviewed. Undo after merge = `git revert` of the one squash
+  commit, via its own PR.
+
+### Removal Checklist (in order)
+
+#### 1. Move the acceptance-criteria tests off the register (nothing removed yet)
+
+These tests use the register only as a convenient source; what they prove (errors
+visible, failed run, rollback) must survive. Point them at the state portal:
+- `tests/test_pipeline_integration.py`: `test_errors_visible_in_ingest_run`,
+  `test_unreachable_source_is_a_failed_run`, `test_crash_rolls_back_records_and_fails_run`
+  -> the state portal, narrowed to one city and one status (`model_copy`, as
+  `select_sources` does) so each test maps one listing URL:
+  - errors: a listing with one good marker and one without `kategorie` ->
+    `missing_title`, `records_rejected = 1` (replaces `unexpected_status`)
+  - failed run: a 503 on the listing
+  - crash: the BEENDETE fixture plus its detail pages (or 404s, which only flag the rows)
+- `tests/test_quality_report.py`: the failed-run test -> `source="sachsen_portal"`.
+- `tests/test_upsert.py`: `test_same_id_from_two_sources_is_two_rows` -> a placeholder
+  second source name; it tests the unique key, which stays `(source, source_record_id)`.
+
+Commit: `test: run failure-path tests against the state portal`
+
+#### 2. Remove the source end to end
+
+- `config/settings.yml`: the `leipzig_stadtportal` source.
+- `src/harvester/config.py`: `LeipzigStadtSource`; `sources` becomes
+  `list[SachsenSource]`.
+- `src/harvester/adapters/leipzig_stadtportal.py`: delete.
+- `src/harvester/adapters/base.py`: drop `unexpected_row_layout` / `unexpected_status`
+  from the error-kind comment.
+- `src/harvester/runner.py`: the `Source` union and the dispatch on source type.
+- `src/harvester/cli.py`: the `LeipzigStadtSource` branch in `select_sources`. Keep
+  `--source` and the `sources` list: changing the config shape is churn with no gain.
+- `src/harvester/pipeline/normalise.py`: the "source gives district only" branch.
+- `src/harvester/models.py`: the `source` comment.
+- Tests: delete `tests/test_leipzig_adapter.py`; the register cases in `test_config.py`,
+  `test_cli.py` (dry run -> state portal), `test_normalise.py` (the two `leipzig_row`
+  tests) and the register fixture mapping and expected row in
+  `test_pipeline_integration.py`.
+- Fixtures: delete `leipzig_stadt_listing_im_verfahren.html`; drop the register rows in
+  `tests/fixtures/SOURCES.md`.
+
+Commit: `refactor: drop the Leipzig city register source`
+
+#### 3. Remove the Thema filter path
+
+- `src/harvester/models.py`: `ScrapedRecord.thema`.
+- `src/harvester/pipeline/filter.py`: `THEMA_PREFIX`, `_thema_signals`, the `thema`
+  argument of `check()`; the caller in `normalise.py`.
+- `src/harvester/config.py` and `config/settings.yml`: `thema_signals`.
+- `tests/test_filter.py`: `test_matches_thema_gewerbe_among_several` and the fixture's
+  `thema_signals`.
+
+Commit: `refactor: filter on title keywords only`
+
+#### 4. Validation SQL
+
+- `sql/validation_queries.sql`: delete check 10 (cross-portal pairs); it is the last
+  check, so nothing is renumbered. Check 9's `--city dresden` comment still holds
+  (state-portal Leipzig rows).
+
+Commit: `refactor(sql): drop the cross-portal check`
+
+#### 5. Fresh live run and sample
+
+The local `iris` database holds the 10 register rows. Start from an empty one (the user
+runs `docker compose down -v`; everything in it is regenerable), then:
+`docker compose up -d`, `uv run alembic upgrade head`, `uv run harvester run`,
+`uv run harvester report`, the validation SQL, and the README's `COPY` command to
+regenerate `sample_output/signal_ingest_sample.csv` (9 rows). Run `harvester run` a
+second time for the re-run numbers (0 inserted, 9 updated).
+
+Commit: `chore: regenerate sample CSV from the state portal only`
+
+#### 6. README
+
+- Intro and "How it works": one portal.
+- "Data sources": one-column table; drop "Why the second source".
+- "Mapping assumptions": drop the register column, the `thema:Gewerbe` mention and the
+  "rechtskräftig" sentence in the finished-hearings bullet; the "each portal's copy"
+  bullet goes.
+- Quality report output, check table (checks 1-9) and re-run counts from step 5.
+- "Known limitations": drop the register (no date or point), Thema "Gewerbe" mixed use,
+  and Nr. 911 on both portals. Add: the state portal lists only the procedures a city
+  publishes there (Leipzig: 23, none open and industrial on 2026-10-28).
+- "Tests": the db test descriptions that mention the register.
+
+Commit: `docs: describe the state portal as the only source`
+
+#### 7. This plan
+
+- Key Discoveries 1, 3, 8, Portal Details, the Leipzig adapter section, Source Overlap,
+  and the Phase 2-5 choices that rest on the register: mark "dropped in Phase 6" rather
+  than delete, so the reasoning stays traceable.
+- Choices below: fill in as decided.
+
+Commit: `docs(plan): record dropping the Leipzig register`
+
+### Choices You May Be Asked About
+
+- **Why drop a source that works?** The brief names one source and asks to identify "the
+  relevant" source. The register added 10 rows without dates or points, 7 of them on
+  Thema only, and code that serves no acceptance criterion.
+- **Why port the failure tests instead of deleting them with the register?** They prove
+  acceptance criteria (errors visible, failed run, rollback), not register behaviour.
+- **Why keep `source` in the schema and the `sources` list in config?** No migration and
+  no config reshape; the unique key and per-source runs stay correct with one source.
+
+### Success Criteria
+
+#### Automated Verification
+- [ ] `tests` workflow green on the PR
+- [ ] `grep -rniE "leipzig_stadt|stadtportal|thema" src tests config sql` finds nothing
+
+#### Manual Verification
+- [ ] Live run: 9 records (Dresden 7, Leipzig 2), all with a point and a date
+- [ ] Re-run: 0 inserted, 9 updated, still 9 records
+- [ ] Validation checks 1-9 give the README's expected results
+- [ ] Sample CSV has 9 rows
+
+**Checkpoint:** PR reviewed and squash-merged.
+
+---
+
 ## Testing Strategy
 
 ### Unit Tests
