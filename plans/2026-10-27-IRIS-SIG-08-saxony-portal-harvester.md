@@ -538,9 +538,9 @@ pipeline sets `geocode_status` per record:
 | Case | `geocode_status` | `geometry` | `geocode_reason` |
 |---|---|---|---|
 | Marker coordinates parse as finite numbers and lie inside the city's bounding box | `source_coordinates` | EPSG:25832 point | NULL |
-| Marker coordinates missing or empty | `unresolved` | NULL | `marker has no coordinates` |
+| Marker coordinates missing or blank (either one) | `unresolved` | NULL | `marker has no coordinates` |
 | Leipzig city-portal row | `unresolved` | NULL | `source gives district only: <districts>` |
-| Coordinates non-numeric, non-finite or outside the box (e.g. lat/lon swapped) | `rejected_out_of_bounds` | NULL | e.g. `lon 51.05 outside dresden [13.55, 13.95]` |
+| Coordinates non-numeric, non-finite or outside the box (e.g. lat/lon swapped) | `rejected_out_of_bounds` | NULL | e.g. `lon 51.05 outside dresden [13.55, 13.95]`, `lon 'abc' is not a number` |
 
 **Bounding box rejection:** coordinates are checked in WGS84 against the per-city box from
 `settings.yml` **before** they reach the database. Rejected rows are stored with
@@ -1327,11 +1327,13 @@ state-portal detail page of each match, parse the date, check the coordinates.
 Industrial keyword filter as specified above. `IndustrialFilter(config.industrial_filter)`
 takes the validated config section directly.
 
-#### 2. `src/harvester/pipeline/geocode.py`
+#### 2. `src/harvester/pipeline/geocode.py` ✅
 
-- `check_coordinates(city, lon, lat, bbox) -> tuple[float | None, float | None, str, str | None]`
-  returns `(lon, lat, geocode_status, geocode_reason)` following the table in **Coordinates
-  and Bounding Box**. Pure Python; the transform happens in the upsert SQL.
+- `check_coordinates(lon, lat, city, bbox) -> GeocodeResult` (a NamedTuple of `lon, lat,
+  status, reason`) following the table in **Coordinates and Bounding Box**. Pure Python; the
+  transform happens in the upsert SQL.
+- It only judges coordinates. The Leipzig "district only" reason is set in `normalise`, which
+  knows the source gives no coordinates at all.
 
 #### 3. `src/harvester/pipeline/normalise.py`
 
@@ -1362,7 +1364,7 @@ def test_in_bounds_is_source_coordinates():
 def test_missing_coordinates_unresolved():
 def test_rejects_out_of_bounds():
 def test_rejects_swapped_lat_lon():
-def test_rejects_non_numeric_and_non_finite():  # "", "abc", NaN
+def test_rejects_non_numeric_and_non_finite():  # "abc", "13,76", NaN, inf
 
 # tests/test_normalise.py
 def test_publication_date_is_zeitraum_start():
@@ -1394,6 +1396,16 @@ Decided in this plan; confirm or update each one as the step is built.
 - **Why substring matching for long keywords but whole tokens for GE/GI/GVZ?** German compounds
   ("Gewerbestandort") need substring hits; short codes as substrings would hit ordinary words
   ("gegen").
+- **Why is a missing coordinate `unresolved` but a bad one `rejected`?** Missing means the
+  source gave no location, which is normal. A value that is there but not a number or outside
+  the box means the source data is wrong, and that should stand out in the report. (Step 2,
+  built)
+- **Why not fix swapped lat/lon automatically?** Guessing would store a point nobody can vouch
+  for; the brief says invalid coordinates must not be silently accepted. The raw values stay
+  in `raw_data`. (Step 2, built)
+- **Why no geocoding of addresses or Leipzig districts?** The brief asks for points "where the
+  source provides sufficient information". A district is an area, and an external geocoder
+  adds a dependency and its own errors; see "What We Are NOT Doing". (Step 2)
 - **Why check the bounding box in Python, before the database?** A bad point is never written;
   the row is stored with `geometry = NULL`, `rejected_out_of_bounds` and the reason.
 - **Why is the check written as "inside" (`min <= v <= max`)?** NaN fails every comparison, so
