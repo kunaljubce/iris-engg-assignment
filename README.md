@@ -15,8 +15,6 @@ IRIS-SIG-08: harvest land-use plan hearings (Bauleitplanverfahren) for Dresden a
 | Run tracking | `runner.py` | one `ingest_run` row per run, with counts and errors |
 | CLI | `cli.py`, `report.py` | `harvester run` and `harvester report` |
 
-More detail: [Design](docs/DESIGN.md) · [Implementation](docs/IMPLEMENTATION.md) · [Tests](docs/TESTS.md)
-
 ## Data source
 
 The Saxon state participation portal, `buergerbeteiligung.sachsen.de` is a public site, read with plain HTTP GET requests: no login, no browser, no API key. The saved pages and their URLs are in `tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
@@ -288,10 +286,6 @@ iris-engg-assignment/
     test_quality_report.py          # latest run, failed run + errors, empty database
   sample_output/
     signal_ingest_sample.csv        # the 9 live records of 2026-10-28
-  docs/
-    DESIGN.md                       # design decisions, schema, upsert, filter
-    IMPLEMENTATION.md               # how each module behaves
-    TESTS.md                        # test strategy and infrastructure
   README.md
 ```
 
