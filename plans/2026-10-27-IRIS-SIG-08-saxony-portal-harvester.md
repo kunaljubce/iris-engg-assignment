@@ -188,6 +188,7 @@ iris-engg-assignment/
       __main__.py                   # `python -m harvester`: calls cli.main()
       cli.py                        # click CLI; `harvester` console script (pyproject)
       runner.py                     # run_source(): one source end to end, tracked in ingest_run
+      report.py                     # quality report from ingest_run + signal_ingest
       config.py                     # pydantic-settings: POSTGRES_* -> DB URL; settings.yml
       models.py                     # ScrapedRecord, NormalisedRecord
       db/
@@ -205,14 +206,12 @@ iris-engg-assignment/
         normalise.py                # ScrapedRecord -> NormalisedRecord, date parsing, quality flags
         filter.py                   # industrial keyword matcher
         geocode.py                  # bounding-box check of source coordinates
-      reporting/
-        __init__.py
-        quality_report.py           # generates report from ingest_run data
   .github/
     workflows/
       ci.yml                        # ruff, mypy, migrations, all tests on push to main
   sql/
     validation_queries.sql          # post-ingest verification
+    export_samples.sql              # writes sample_output/ CSV + GeoJSON via psql
   tests/
     __init__.py
     conftest.py                     # fixture loader, httpx MockTransport, DB fixtures
@@ -232,7 +231,7 @@ iris-engg-assignment/
     test_bounding_box.py            # out-of-bounds rejection + ST_Transform, against PostGIS
     test_pipeline_integration.py    # run_source over fixtures: counts, re-run, errors, crash
     test_cli.py                     # source/city selection, --dry-run without a database
-    test_quality_report.py
+    test_quality_report.py          # latest run, failed run + errors, empty database
   sample_output/
     signal_ingest_sample.csv
     signal_ingest_sample.geojson
@@ -1507,7 +1506,7 @@ and integration tests including idempotent re-run and duplicate detection.
 - `--dry-run` prints every scraped record (KEEP with keywords, date, geocode, flags, or `-`)
   and the scrape errors; it needs no database.
 - A normal run prints one summary line per source and exits 1 if any run failed.
-- `harvester report` comes with the report itself in Phase 5.
+- `harvester report` came with the report itself in Phase 5.
 
 #### 5. Tests ✅
 
@@ -1608,34 +1607,61 @@ completes all deliverables.
 
 ### Changes Required
 
-#### 1. `src/harvester/reporting/quality_report.py`
+#### 1. `src/harvester/report.py` + `harvester report` ✅
 
-Generates a report from `ingest_run` and `signal_ingest` tables:
+`harvester report` (also `python -m harvester report`) prints four aligned tables, from
+the database only:
+
+- **Latest runs**, one row per source (`DISTINCT ON (source) … ORDER BY started_at
+  DESC`): city (`all` when the run covered all the source's cities), status, start in
+  UTC, scraped, industrial, rejected, inserted, updated, errors.
+- **Run errors** of those runs: count per error kind with its first message as an
+  example, plus a failed run's message as kind `run_failed`. The full list stays in
+  `ingest_run.errors`.
+- **Stored records** per source and city: records, with point, `unresolved`, and
+  `rejected_out_of_bounds` ("rejected bbox"). This covers all rows, i.e. what a consumer
+  of `signal_ingest` sees, not only the latest run's.
+- **Quality flags** per source and city.
+
+Aggregates only, each serving the acceptance criterion "errors and missing fields are
+visible; invalid coordinates are not silently accepted". No notes next to the numbers:
+the column names are the field names, and the README explains them once. Row-level
+checks (e.g. filter evidence per record) belong in `sql/validation_queries.sql`.
+
+Live output on 2026-10-28:
 
 ```
-=== IRIS-SIG-08 Ingest Quality Report ===
-Run ID:        <uuid>
-Started:       2026-10-27 14:30:00 UTC
-Finished:      2026-10-27 14:32:15 UTC
-Source:        sachsen_portal (dresden)
+IRIS-SIG-08 quality report
 
-Records scraped:     60   (8 AKTUELLE + 52 BEENDETE markers)
-Filtered out:        53   (not industrial)
-Rejected:             0   (unusable, see errors)
-Industrial matches:   7 / 60 (11.7%)
-  inserted:           2
-  updated:            5   (already present, rewritten)
-Errors:               0
+Latest runs
+  source               city     status     started (UTC)     scraped  industrial  rejected  inserted  updated  errors
+  leipzig_stadtportal  leipzig  completed  2026-10-28 07:47       39          10         0        10        0       0
+  sachsen_portal       all      completed  2026-10-28 07:46       83           9         0         9        0       0
 
-Geocode source_coordinates: 7 / 7
-Geocode unresolved:         0 / 7
-Geocode rejected:           0 / 7
+Run errors
+  none
 
-Missing publication date:   0 / 7
+Stored records
+  source               city     records  with point  unresolved  rejected bbox
+  leipzig_stadtportal  leipzig       10           0          10              0
+  sachsen_portal       dresden        7           7           0              0
+  sachsen_portal       leipzig        2           2           0              0
 
-Top matched keywords:
-  Gewerbe          - 7 records
+Quality flags
+  source               city     flag                      records
+  leipzig_stadtportal  leipzig  missing_publication_date       10
 ```
+
+Built differently from the first draft of this plan:
+- One block per **source**, not per run and city ("sachsen_portal (dresden)"): since
+  Phase 4 a run covers a whole source, so the per-city view comes from `signal_ingest`.
+- No "8 AKTUELLE + 52 BEENDETE" split of the scraped count: it isn't stored, and adding a
+  column only for the report isn't worth it.
+- `report.py` next to `runner.py` instead of a `reporting/` package holding one module.
+- No per-record list and no keyword ranking: the brief asks for a concise report, and
+  neither serves an acceptance criterion.
+- Tables instead of labelled blocks per run; no run ID, finish time, filtered-out count or
+  match percentage (scraped and industrial sit side by side; the rest is in `ingest_run`).
 
 #### 2. `sql/validation_queries.sql`
 
@@ -1668,12 +1694,15 @@ FROM iris_staging.signal_ingest
 GROUP BY 1, 2
 HAVING count(DISTINCT source) > 1;
 
--- 7. Stale rows: not written by the latest completed run of their source
-SELECT s.source, s.source_record_id, s.title, s.updated_at
+-- 7. Stale rows: not written by the latest completed run that covered their city.
+--    A run's city is NULL when it covered all the source's cities; comparing with the
+--    source's latest run alone would list every Leipzig row after `--city dresden`
+SELECT s.source, s.source_record_id, s.city, s.title, s.updated_at
 FROM iris_staging.signal_ingest s
 WHERE s.ingest_run_id <> (
     SELECT r.id FROM iris_staging.ingest_run r
     WHERE r.source = s.source AND r.status = 'completed'
+      AND (r.city IS NULL OR r.city = s.city)
     ORDER BY r.started_at DESC LIMIT 1
 );
 
@@ -1699,6 +1728,13 @@ WHERE geometry IS NOT NULL
 Generated from a real run against the portals. CSV with all columns. GeoJSON with the rows
 that have a geometry, for visual inspection.
 
+Written by `sql/export_samples.sql` with `psql`: `\copy (SELECT …) TO … CSV HEADER` for
+the CSV, and one query building the FeatureCollection with `json_build_object` /
+`json_agg` and `ST_AsGeoJSON(ST_Transform(geometry, 4326))` (GeoJSON is WGS84 by spec).
+No Python export command: nothing more to maintain, and anyone can repeat it with `psql`.
+The README's database checks move into `validation_queries.sql`, and the README points
+to the file.
+
 #### 4. `README.md`
 
 Full README covering:
@@ -1718,21 +1754,19 @@ Full README covering:
   source overlap, EPSG zone note, dependence on the `drawMarkers` script call)
 - Adding new cities/districts
 
-#### 5. Tests
+#### 5. Tests ✅ (report)
 
-```python
-# tests/test_quality_report.py
-@pytest.mark.db
-def test_report_generation(db_session_with_data):
-    """Report generates without error and includes expected sections."""
+`tests/test_quality_report.py`, 3 db tests:
+- the latest run per source is shown (not an older one) with its UTC start and counts;
+  stored records by city with point and geocode counts, and flag counts
+- a failed run shows its failure as `run_failed` and its errors counted by kind, with an
+  example message
+- an empty database prints every section with "no runs yet" / "none" instead of failing
 
-@pytest.mark.db
-def test_report_lists_errors_and_quality_flags(db_session_with_data):
-    """Rejected records, quality flag counts and missing-date counts are shown."""
-```
+Rows are compared with whitespace collapsed, so the tests don't depend on column widths.
 
-The report also prints quality-flag counts (e.g. `missing_publication_date: 214`) and
-filter evidence for spotting false positives.
+The tests set `started_at` explicitly: `NOW()` is the transaction start, so every run
+made in one test transaction would otherwise have the same time.
 
 ### Choices You May Be Asked About
 
@@ -1743,6 +1777,24 @@ Decided in this plan; confirm or update each one as the step is built.
   city and plan number (e.g. Nr. 911).
 - **Why EPSG:25832 although both cities lie east of 12° E?** The brief requires it; it's usable
   there with growing scale distortion, documented in the README.
+- **Why does the report show the latest run per source, but all stored records?** The run
+  block answers "did the last harvest work?"; the records block answers "what does
+  `signal_ingest` hold?", which is what a consumer reads. Rows from older runs (e.g. a plan
+  that has since left the portal) are still in the table, so they belong in that count.
+- **Why only aggregates, no per-record list or keyword ranking?** The brief asks for a
+  concise error/quality report; each section maps to "errors and missing fields are
+  visible; invalid coordinates are not silently accepted". Inspecting rows (e.g. the
+  filter evidence, to check false positives) is a validation query, and the evidence is
+  stored per record in `raw_data->'filter_evidence'`.
+- **Why errors by kind with one example, not the error list?** An outage gives one error
+  per page; the count by kind says what happened, and the full list stays in
+  `ingest_run.errors`.
+- **Why read from the database instead of the run's in-memory summary?** The report then
+  works at any time, after any run or a crash, and checks what was actually committed.
+- **Why export samples with SQL rather than a Python command?** It's two queries, needs no
+  new code to test or defend, and is repeatable by anyone with `psql`.
+- **Why does the stale-rows query match the run's city?** A `--city dresden` run doesn't
+  touch Leipzig rows; without the city condition they would all look stale.
 
 ### Success Criteria
 
@@ -1750,7 +1802,7 @@ Decided in this plan; confirm or update each one as the step is built.
 - [ ] `pytest` -- full suite passes
 - [ ] `ruff check .` passes
 - [ ] `mypy .` passes
-- [ ] `python -m harvester report` generates report without error
+- [x] `python -m harvester report` generates report without error (live, 2026-10-28)
 
 #### Manual Verification
 - [ ] README instructions produce a working setup from scratch

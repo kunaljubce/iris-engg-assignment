@@ -1,4 +1,4 @@
-"""Command line: `harvester run [--dry-run] [--source NAME] [--city SLUG]`."""
+"""Command line: `harvester run [--dry-run] [--source NAME] [--city SLUG]`, `harvester report`."""
 
 import logging
 
@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from harvester.adapters.fetch import make_client
 from harvester.config import HarvesterConfig, LeipzigStadtSource, SachsenSource, load_config
 from harvester.db.engine import DatabaseConfigError, make_engine
+from harvester.report import quality_report
 from harvester.runner import RunSummary, Source, run_source, scrape_and_normalise
 
 
@@ -49,6 +50,18 @@ def run(dry_run: bool, source_name: str | None, city: str | None) -> None:
     if any(s.status == "failed" for s in summaries):
         # Non-zero exit, so a scheduler sees the failure; the details are in ingest_run
         raise SystemExit(1)
+
+
+@cli.command()
+def report() -> None:
+    """Print the quality report: latest run per source and the stored records."""
+    try:
+        engine = make_engine()
+    except DatabaseConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    with engine.connect() as conn:
+        click.echo(quality_report(conn))
+    engine.dispose()
 
 
 def select_sources(

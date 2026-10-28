@@ -84,8 +84,7 @@ exits with code 1 if any run failed. Re-running is safe: records are upserted on
 
 ### Check the results in the database
 
-Open a SQL shell with `docker compose exec db psql -U iris -d iris`, or run a single
-query with `docker compose exec db psql -U iris -d iris -c "<query>"`.
+Open a SQL shell with `docker compose exec db psql -U iris -d iris`.
 
 ```sql
 -- 1. The tables exist
