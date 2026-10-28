@@ -334,38 +334,6 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
 
 #### 4. Alembic setup ✅
 
-- `alembic.ini` -- points to `migrations/` directory. It holds **no** `sqlalchemy.url`.
-- `migrations/env.py` builds its engine from `DatabaseSettings().url` and passes the
-  connection to Alembic. Don't copy the URL into the ini with `set_main_option()`: it
-  needs the plain-text password, and configparser treats `%` in it as interpolation.
-- **Offline mode** (`alembic upgrade head --sql`) configures only `dialect_name="postgresql"`,
-  so the SQL script can be produced without a `.env` or a running database.
-- **Version table in our schema:** `version_table_schema="iris_staging"`. A default
-  `public.alembic_version` would collide with any other Alembic-managed project in a shared
-  database. Alembic creates its table before migration 001 runs, so `env.py` runs
-  `CREATE SCHEMA IF NOT EXISTS iris_staging` first (committed separately online; emitted at
-  the top of the script offline).
-- `alembic.ini` post-write hooks run `ruff check --fix` and `ruff format` on every generated
-  revision. Generate with `--rev-id 001` etc. so file names follow `001_<slug>.py`.
-- `target_metadata = None`: there are no ORM models, so no autogenerate (and no GeoAlchemy2
-  helpers or schema filters that autogenerate would need).
-- `migrations/versions/001_create_schema_and_tables.py`, created with
-  `alembic revision --rev-id 001 -m "create schema and tables"` and written **by hand as
-  plain SQL**, copied from **Database Schema**. This DDL is the single source of truth for the
-  schema.
-  - **One `op.execute()` per statement**, not one string with several `;`-separated
-    statements, so an error points at the right statement. `'{}'::text[]`-style casts are
-    fine: `text()` treats `:name` as a parameter but recognises `::`.
-  - `CREATE EXTENSION IF NOT EXISTS postgis`
-  - `CREATE SCHEMA IF NOT EXISTS iris_staging` (already created by `env.py`; kept so the
-    migration's own SQL is complete when read on its own)
-  - Create `iris_staging.ingest_run`, then `iris_staging.signal_ingest` (it references
-    `ingest_run`), with all columns and constraints. No `CREATE INDEX`: see **Database Schema**
-  - `downgrade()` drops **only the two tables**. It keeps the `postgis` extension, which other
-    schemas in a shared database may depend on, and the `iris_staging` schema, which holds
-    Alembic's version table and may hold other pipelines' tables. Same rule for both: a
-    migration only removes what it alone owns.
-
 #### 5. `src/harvester/config.py` ✅
 
 - **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`,
@@ -433,29 +401,6 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
 - **Why `uv` and a committed `uv.lock`?** Every checkout resolves the same interpreter and
   package versions.
 
-### Success Criteria
-
-#### Automated Verification
-- [ ] `docker compose up -d` starts PostgreSQL with PostGIS (and fails clearly if `.env` is missing)
-- [ ] `SELECT PostGIS_Version()` works in both `iris` and `iris_test`; the logs show both
-      `10_postgis.sh` and `20_create_test_db.sql` ran
-- [ ] `alembic upgrade head` creates schema and tables without errors
-- [ ] `alembic downgrade base` + `alembic upgrade head` is idempotent
-- [ ] `alembic upgrade head --sql` prints the full DDL without a database or `.env`
-- [ ] `ruff check .` passes
-- [ ] `mypy src/harvester/config.py` passes
-
-#### Manual Verification
-- [ ] `psql` shows `iris_staging.signal_ingest` and `iris_staging.ingest_run` tables
-- [ ] `SELECT PostGIS_Version();` returns `3.4`
-- [ ] Geometry column has SRID 25832
-- [ ] The constraints bite: an insert with `geocode_status = 'source_coordinates'`
-      and a NULL geometry fails with `ck_geometry_matches_status`, an unknown
-      `geocode_status` value fails its CHECK, an empty `matched_keywords` fails its CHECK,
-      and a repeated `(source, source_record_id)` fails `uq_source_record`
-
-**Checkpoint:** Pause for confirmation before proceeding to Phase 2.
-
 ---
 
 ## Phase 2: Adapters and HTML Parsing ✅
@@ -466,17 +411,6 @@ Implement `fetch()` and the state portal adapter (httpx + BeautifulSoup), produc
 instances. Test with saved HTML fixtures (no live network).
 
 ### Changes Required
-
-#### 0. Follow-ups from the captures ✅
-
-- `pyproject.toml`: `uv remove playwright pyproj && uv add httpx` (see Phase 1 step 1).
-- `config/settings.yml` + `config.py`: drop `headless` / `page_timeout_ms`, add
-  `timeout_seconds` (see Phase 1 step 5); adjust `tests/test_config.py`.
-- Migration `001` (not applied anywhere but local dev databases): `geocode_status` values
-  `source_coordinates` / `unresolved` / `rejected_out_of_bounds`, `ck_geometry_matches_status`
-  on `source_coordinates`, a `location_text` column, `date_source` dropped. Re-apply with
-  `alembic downgrade base && alembic upgrade head`.
-- README: remove the `playwright install chromium` step.
 
 #### 1. `src/harvester/models.py` ✅
 
