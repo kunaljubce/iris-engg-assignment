@@ -1716,24 +1716,31 @@ Built differently from the first draft of this plan:
   isn't needed; the points are in the CSV as coordinates.
 - No `sql/export_samples.sql`: one `COPY` command in the README does the same.
 
-#### 4. `README.md`
+#### 4. `README.md` ✅
 
-Full README covering:
-- Project description and scope
-- Prerequisites (uv, Docker; uv provides Python 3.12 via `.python-version`)
-- Setup (`uv sync`, `.env`, `docker compose up -d`, `uv run alembic upgrade head`), started
-  in Phase 1 and extended as steps are added.
-- Quick start (`uv run harvester run`)
-- Configuration (`settings.yml`, environment variables)
-- Architecture overview (adapters, pipeline, DB)
-- Testing (`pytest`)
-- Validation (`sql/validation_queries.sql` via `psql`)
-- Data source and access: both portals, public GET pages only, verified 2026-10-27
-- Mapping assumptions: publication date = "Zeitraum" start; marker coordinates as the
-  procedure location; Leipzig city portal limited to "im Verfahren"
-- Known limitations (Leipzig city-portal rows unresolved and undated, title-only filter,
-  source overlap, EPSG zone note, dependence on the `drawMarkers` script call)
-- Adding new cities/districts
+Sections, each tied to the brief's "README explaining data source, mapping assumptions,
+how to run, and known limitations" or to an acceptance criterion:
+
+| Section | Serves |
+|---|---|
+| Intro + "How it works" (one table: step, code, what it does) | maintainable |
+| Data sources: both portals, access, selection, pagination, counts, why the second source | data source; "access verified rather than assumed" |
+| Mapping assumptions: column-by-source table, filter, Zeitraum date, coordinates, flags | mapping assumptions |
+| Setup, Run the harvester, Quality report, validation checks, Sample output | how to run; demonstrable |
+| Configuration: `settings.yml`, `.env`, adding a city | configurable |
+| Tests: fixtures, retries, the db tests incl. re-run / duplicates, CI | automated tests incl. re-run/duplicate behaviour |
+| Known limitations | known limitations |
+
+Known limitations listed: title-only filter (Nr. 422 Radefelder Allee West), Thema
+"Gewerbe" on mixed-use plans (7 of 10 register rows match on Thema only), register rows
+without date or point, the same plan on both portals (Nr. 911), EPSG:25832 outside its
+zone, dependence on the portals' markup, rows never deleted.
+
+Built differently from the first draft of this plan:
+- No separate "Quick start", "Architecture overview" or "Adding new cities" sections:
+  "Run the harvester", the "How it works" table and one paragraph in Configuration cover
+  them.
+- No test count in the README; it would go stale with every test added.
 
 #### 5. Tests ✅ (report)
 
@@ -1758,6 +1765,13 @@ Decided in this plan; confirm or update each one as the step is built.
   city and plan number (e.g. Nr. 911).
 - **Why EPSG:25832 although both cities lie east of 12° E?** The brief requires it; it's usable
   there with growing scale distortion, documented in the README.
+- **Why keep the Thema-only Leipzig matches although some are mixed-use?** The city itself
+  tags them "Gewerbe", and dropping them would need a judgement per plan. They are marked
+  `thema:Gewerbe` in `matched_keywords` and listed as a known limitation, so a consumer can
+  filter them out.
+- **Why no district centroids for the Leipzig register rows?** A district is several km²;
+  its centroid would be a made-up location. `unresolved` with the district as
+  `location_text` is honest, and the brief asks to document unresolved locations.
 - **Why does the report show the latest run per source, but all stored records?** The run
   block answers "did the last harvest work?"; the records block answers "what does
   `signal_ingest` hold?", which is what a consumer reads. Rows from older runs (e.g. a plan
@@ -1789,9 +1803,9 @@ Decided in this plan; confirm or update each one as the step is built.
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `pytest` -- full suite passes
-- [ ] `ruff check .` passes
-- [ ] `mypy .` passes
+- [x] `pytest` -- full suite passes (91 tests)
+- [x] `ruff check .` passes
+- [x] `mypy .` passes
 - [x] `python -m harvester report` generates report without error (live, 2026-10-28)
 
 #### Manual Verification

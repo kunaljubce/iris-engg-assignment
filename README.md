@@ -2,12 +2,75 @@
 
 [![tests](https://github.com/kunaljubce/iris-engg-assignment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunaljubce/iris-engg-assignment/actions/workflows/ci.yml)
 
-Filter industrial land-use zoning hearings around Dresden and Leipzig.
+IRIS-SIG-08: harvest land-use plan hearings (Bauleitplanverfahren) for Dresden and
+Leipzig, keep the industrial ones, and load them into `iris_staging.signal_ingest`
+(PostgreSQL 16 / PostGIS 3.4) with EPSG:25832 points.
 
-Sources, both public pages fetched with plain HTTP GET requests (no browser needed):
+**How it works.** One run per source: scrape → filter → normalise → upsert, tracked in
+`iris_staging.ingest_run`.
 
-- Saxon state participation portal, `buergerbeteiligung.sachsen.de` (Dresden and Leipzig)
-- Leipzig city plan register, `www.leipzig.de` (plans "im Verfahren" only)
+| Step | Code | What it does |
+|---|---|---|
+| Scrape | `src/harvester/adapters/` | one module per portal; `fetch.py` does the GET requests with retries and a delay |
+| Filter | `pipeline/filter.py` | keeps records whose title (or Leipzig Thema) names an industrial use |
+| Normalise | `pipeline/normalise.py`, `pipeline/geocode.py` | publication date, bounding-box check of the coordinates, quality flags |
+| Upsert | `db/upsert.py` | `INSERT … ON CONFLICT (source, source_record_id) DO UPDATE`, WGS84 → EPSG:25832 in PostGIS |
+| Run tracking | `runner.py` | one `ingest_run` row per source and run, with counts and errors |
+| CLI | `cli.py`, `report.py` | `harvester run` and `harvester report` |
+
+## Data sources
+
+Both are public pages, read with plain HTTP GET requests: no login, no browser, no API
+key. Checked live on 2026-10-27 and 2026-10-28; the saved pages and their URLs are in
+`tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and timeouts,
+and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
+
+| | Saxon state participation portal | Leipzig city plan register |
+|---|---|---|
+| URL | `buergerbeteiligung.sachsen.de` (the source named in the brief) | `www.leipzig.de` → Bebauungspläne |
+| Cities | Dresden and Leipzig | Leipzig |
+| Selection | format "Bauleitplan", status `AKTUELLE` and `BEENDETE` | status "im Verfahren" only |
+| What is read | the map's `drawMarkers([...])` JSON, one entry per procedure, plus each matching record's detail page | the table rows: title, status, districts, Thema |
+| Pagination | not needed: the marker JSON lists every result; the "von N" count is checked against it | follows the "load more" button page by page |
+| Records (2026-10-28) | 83 (Dresden 60, Leipzig 23), 9 industrial | 39, 10 industrial |
+
+Why the second source: the state portal lists only the procedures Leipzig publishes there
+(23). The city register is Leipzig's own list of plans. Its plans in force
+("rechtskräftig", about 93 %) are not hearings, so only "im Verfahren" plans are read.
+
+## Mapping assumptions
+
+| Column | Saxon state portal | Leipzig city register |
+|---|---|---|
+| `source_record_id` | marker `id` | row id `project-{id}` |
+| `title` | marker title | link text |
+| `detail_url` | marker `href` | link `href` |
+| `city` | the city whose listing it came from (`/portal/dresden/…`, `/portal/leipzig/…`) | `leipzig` |
+| `location_text` | marker address | district(s), e.g. "Nord / Eutritzsch" |
+| `publication_date` | start of the detail page's "Zeitraum" | none |
+| `geometry` | marker latitude / longitude | none (`unresolved`) |
+| `matched_keywords` | keywords found in the title | keywords in the title, plus `thema:Gewerbe` |
+| `raw_data` | marker, raw "Zeitraum" text, filter evidence | status, districts, Thema, listing URL, filter evidence |
+
+- **Industrial means:** the title contains one of the keywords in `config/settings.yml`
+  (e.g. Gewerbe, Industrie, Logistik, Gewerbepark), case-insensitively and also inside
+  compound words (Gewerbecampus). The short codes GE, GI and GVZ match only as whole,
+  upper-case words. A Leipzig register row also matches when its Thema is "Gewerbe". Only
+  matches are stored; the rest are counted as `filtered out` on the run.
+- **Publication date = start of the "Zeitraum".** The state portal has no "published on"
+  field. The detail page's "Zeitraum 12.10.2026 bis 13.11.2026" is the period the draft is
+  publicly displayed (BauGB § 3 (2)), so its start date is used. The raw text is kept in
+  `raw_data`.
+- **The marker coordinates are the plan's location.** They are WGS84 and checked against
+  the city's bounding box in `settings.yml`. Outside the box, or not a number:
+  `rejected_out_of_bounds` with no point, the raw values kept in `raw_data`. Missing:
+  `unresolved`. Inside: transformed to EPSG:25832 by PostGIS (`source_coordinates`).
+- **A record that couldn't be read completely is still stored, flagged:** e.g.
+  `missing_publication_date` or `detail_page_failed` in `quality_flags`. Records that
+  can't be used at all (no ID or title) are not stored; they are counted as `rejected`
+  with the error on the run.
+- **Each portal's copy of a plan is its own row,** with its own ID and URL (see the
+  limitations).
 
 ## Setup
 
@@ -203,3 +266,64 @@ Notes:
 - **Database init scripts run only once, on an empty data volume.** After editing `docker/initdb/20_create_test_db.sql`, or `POSTGRES_USER`, `POSTGRES_PASSWORD` or `POSTGRES_DB` in `.env`, reset the database (`docker compose down -v`) for the change to take effect.
 - **Apple Silicon:** the official `postgis/postgis` image is amd64-only, so Docker runs it under emulation (`platform: linux/amd64` in `docker-compose.yml`). It's slower to start but fine for this dataset.
 - **Everything the harvester creates is in the `iris_staging` schema,** including Alembic's version table (`iris_staging.alembic_version`). Migrations never drop the schema or the PostGIS extension.
+
+## Configuration
+
+- **`config/settings.yml`** (no secrets, checked in): the sources and their cities, the
+  request delay, retries and timeout, the industrial keywords, and a WGS84 bounding box
+  per city. It is validated on load: an unknown key, an inverted box, or a city without a
+  box stops the run with a clear error.
+- **`.env`** (gitignored, from `.env.example`): the `POSTGRES_*` connection settings, and
+  optionally `HARVESTER_USER_AGENT` to add an operator contact to the user agent.
+
+To add a city that is on the state portal, add its portal slug under the
+`sachsen_portal` source's `cities` and its box under `bounding_boxes`; no code changes. Each run stores
+the config it used in `ingest_run.config_snapshot`.
+
+## Tests
+
+`uv run pytest` runs all tests. The scrapers are tested against real pages saved on
+2026-10-27 (`tests/fixtures/`, provenance in `SOURCES.md`) through httpx's mock
+transport, so no test touches the network. Edge cases (empty listing, malformed markers,
+HTTP errors, next page) are small HTML snippets inside the tests. `test_fetch.py` covers
+the retries: 5xx, 429 with `Retry-After` and timeouts are retried, 404 is not.
+
+The `db` tests run against `iris_test`:
+
+- `test_upsert.py`: a re-run inserts nothing and keeps each row's `id` and
+  `created_at`; a key repeated in one batch is written once and reported.
+- `test_pipeline_integration.py`: the whole run from fixtures to the database; running it
+  twice leaves the same rows; an unreachable source gives a `failed` run; a crash after
+  the upsert leaves no records.
+- `test_bounding_box.py`: points outside the box are stored without geometry; the
+  EPSG:25832 transform matches pyproj within 1 m.
+- `test_quality_report.py`: the report's tables.
+
+CI (`.github/workflows/ci.yml`) runs ruff, mypy, the migrations up / down / up and all
+tests against a PostGIS 16-3.4 service on every push to `main`. The badge at the top
+shows the result; it only renders while the repository is public.
+
+## Known limitations
+
+- **The filter reads titles only.** A plan whose title names a place but not the use is
+  missed. For example, Leipzig's "Bebauungsplan Nr. 422 Radefelder Allee West" has no
+  keyword in its title and no Thema in the register.
+- **Thema "Gewerbe" also tags mixed-use plans.** 7 of the 10 Leipzig register rows match
+  on Thema only, among them "Alfred-Kunze-Sportpark" and "Wohngebiet und Reitsportanlage
+  Sternbachstraße". They are kept, since the city tags them as commercial, with
+  `matched_keywords = {thema:Gewerbe}` so they can be told apart.
+- **Leipzig register rows have no date and no point.** The register and its detail pages
+  give only districts, no coordinates and no dates. The rows are `unresolved` with the
+  district as `location_text`, and flagged `missing_publication_date`. District centroids
+  would be a guess, so no point is made up.
+- **The same plan can appear on both portals,** e.g. Leipzig Nr. 911, as two rows with
+  different IDs and URLs. They are not merged; validation check 10 lists the pairs.
+- **EPSG:25832 is used outside its zone.** It covers 6–12° E; Leipzig (~12.4° E) and
+  Dresden (~13.7° E) lie in the zone of EPSG:25833. The brief requires 25832, so points are
+  correct but have growing scale distortion to the east.
+- **The scrapers depend on the portals' markup:** the state portal's `drawMarkers` call
+  and the register's table layout. A change shows as errors on the run
+  (`markers_not_found`, `count_mismatch`, `unexpected_row_layout`) or a `failed` run, not
+  as a silently empty result.
+- **Rows are never deleted.** A plan that leaves a portal stays in the table; validation
+  check 9 lists rows the latest run of their source and city didn't write.
