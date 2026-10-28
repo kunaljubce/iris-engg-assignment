@@ -17,7 +17,7 @@ IRIS-SIG-08: harvest land-use plan hearings (Bauleitplanverfahren) for Dresden a
 
 ## Data source
 
-The Saxon state participation portal, `buergerbeteiligung.sachsen.de` (the source named in the brief). It is a public site, read with plain HTTP GET requests: no login, no browser, no API key. Checked live on 2026-10-27 and 2026-10-28; the saved pages and their URLs are in `tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
+The Saxon state participation portal, `buergerbeteiligung.sachsen.de` is a public site, read with plain HTTP GET requests: no login, no browser, no API key. The saved pages and their URLs are in `tests/fixtures/SOURCES.md`. Requests are 2 s apart, retried on 5xx, 429 and timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
 
 | | |
 |---|---|

@@ -104,101 +104,24 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 ## What We Are NOT Doing
 
 - Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 4).
-- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply
-  coordinates; a marker without them is stored `unresolved` with the reason.
+- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply coordinates; a marker without them is stored `unresolved` with the reason.
 - Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
-- Matching keywords in descriptions. The filter reads titles:
-  plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring
-  uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for
-  matches, for the publication date.
+- Matching keywords in descriptions. The filter reads titles: plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for matches, for the publication date.
 - Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
 - Downloading or parsing PDF plan documents.
 - Building a web UI or API layer.
 - Handling BundID authentication (public pages only).
-- Production hardening (see the scope note in the Overview). For example, no SQLAlchemy
-  `naming_convention`: it only pays off when later migrations alter or drop constraints by
-  name, and this repo is expected to have the single migration `001`. Constraints and
-  indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
-- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second
-  copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the
-  `db`-marked tests run every query against it.
-- Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent
-  re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
-- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The
-  brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees
-  on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
-- Storing non-industrial records. The objective is to *filter*; non-matches are only counted
-  (`records_filtered_out`). `--dry-run` prints every record with its filter decision for
-  tuning the keyword list.
-- Columns the brief doesn't ask for (plan type, plan number, procedure step, status,
-  participation end date). They are kept as scraped in `raw_data`.
-- Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an
-  index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
-- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an
-  older `ingest_run_id` (validation check 9).
+- Production hardening (see the scope note in the Overview). For example, no SQLAlchemy `naming_convention`: it only pays off when later migrations alter or drop constraints by name, and this repo is expected to have the single migration `001`. Constraints and indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
+- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the `db`-marked tests run every query against it.
+- Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
+- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
+- Storing non-industrial records. The objective is to *filter*; non-matches are only counted (`records_filtered_out`). `--dry-run` prints every record with its filter decision for tuning the keyword list.
+- Columns the brief doesn't ask for (plan type, plan number, procedure step, status, participation end date). They are kept as scraped in `raw_data`.
+- Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
+- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an older `ingest_run_id` (validation check 9).
 
----
-
-
-
----
-
----
 
 ## Configuration (settings.yml)
-
-```yaml
-sources:
-  - name: sachsen_portal
-    type: sachsen
-    base_url: "https://buergerbeteiligung.sachsen.de"
-    cities:
-      - slug: dresden
-        label: "Landeshauptstadt Dresden"
-      - slug: leipzig
-        label: "Stadt Leipzig"
-    format_filter: "Bauleitplan"
-    # One listing request per status; BEENDETE is needed for finished procedures
-    status_filters: ["AKTUELLE", "BEENDETE"]
-
-scraping:
-  request_delay_seconds: 2.0
-  max_retries: 3
-  retry_backoff_factor: 2.0
-  # Override via HARVESTER_USER_AGENT env var to add an operator contact address
-  user_agent: "IRIS-SIG-08-Harvester/1.0 (bot)"
-  timeout_seconds: 30.0
-
-industrial_filter:
-  # Case-insensitive match anywhere inside a word, so German compounds hit
-  # (Gewerbestandort, Kleingewerbe, Logistikzentrum)
-  keywords:
-    - "Gewerbegebiet"
-    - "Industriegebiet"
-    - "Gewerbe"
-    - "Industrie"
-    - "Logistik"
-    - "Gewerbepark"
-    - "Industriepark"
-    - "Technologiepark"
-    - "Gueterverkehrszentrum"
-    - "Güterverkehrszentrum"
-    - "Produktion"
-  # Case-SENSITIVE whole-token match: short codes would hit ordinary words inside compounds
-  case_sensitive_tokens:
-    - "GE"
-    - "GI"
-    - "GVZ"
-
-bounding_boxes:
-  # WGS84 [min_lon, min_lat, max_lon, max_lat]
-  dresden: [13.55, 50.95, 13.95, 51.18]
-  leipzig: [12.20, 51.25, 12.55, 51.45]
-```
-
----
-
-
 
 
 ## Coordinates and Bounding Box
@@ -225,11 +148,6 @@ upsert. That keeps pyproj out of the dependencies; the database tests check a co
 Discovery 3). The CRS is still usable there, but scale distortion grows; documented in the
 README.
 
----
-
-
-
----
 
 ## Phase 1: Project Skeleton and Database ✅
 
@@ -266,16 +184,9 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
 
 #### 5. `src/harvester/config.py` ✅
 
-- **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`,
-  `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or
-  `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by
-  `tests/test_config.py`: a password with special characters survives the URL round trip, the
-  password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
-- **Done:** `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with
-  pydantic models, one per section. Only checks that stop a config mistake from silently
-  producing wrong data (the "errors are visible" criterion) are included:
-  - `extra="forbid"`: a misspelt key (e.g. `keyowrds`) fails instead of leaving the filter
-    empty and the run "succeeding" with zero matches
+- **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`, `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by `tests/test_config.py`: a password with special characters survives the URL round trip, the password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
+- **Done:** `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with pydantic models, one per section. Only checks that stop a config mistake from silently producing wrong data (the "errors are visible" criterion) are included:
+  - `extra="forbid"`: a misspelt key (e.g. `keyowrds`) fails instead of leaving the filter empty and the run "succeeding" with zero matches
   - no blank keywords: an empty one would match every title
   - `status_filters` limited to `AKTUELLE` / `BEENDETE`: a typo would skip those plans
   - bounding boxes: exactly 4 values, min below max (a swapped box rejects every point)
@@ -283,53 +194,28 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
   - field types (e.g. a quoted `"2"` delay becomes `2.0`)
 
   `HARVESTER_USER_AGENT` (environment or `.env`) overrides `scraping.user_agent`.
-  `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`. Covered by
-  `tests/test_config.py`.
-- **Changed after the Phase 2 captures:** `scraping.headless` and `page_timeout_ms` removed
-  (Playwright-only), `timeout_seconds: float` added.
-- `rows_per_page` is not in the config: the page size is a property of the portal, and the
-  marker JSON lists every result anyway.
+  `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`. Covered by `tests/test_config.py`.
+- **Changed after the Phase 2 captures:** `scraping.headless` and `page_timeout_ms` removed (Playwright-only), `timeout_seconds: float` added.
+- `rows_per_page` is not in the config: the page size is a property of the portal, and the marker JSON lists every result anyway.
 
 ### Choices You May Be Asked About
 
-- **Why PostGIS in Docker instead of a local install?** One `docker compose up` gives the
-  exact versions the brief names (PostgreSQL 16 / PostGIS 3.4) on any machine.
-- **Why `platform: linux/amd64`?** The official `postgis/postgis` image is amd64-only; on
-  Apple Silicon it runs under emulation. Fine for <1000 rows, and stated so it isn't a surprise.
-- **Why mount the single init SQL file, not a folder?** A folder over
-  `/docker-entrypoint-initdb.d` hides the image's own `10_postgis.sh`, so `iris` would get no
-  PostGIS.
-- **Why a separate `iris_test` database?** The db tests truncate and rewrite tables; they must
-  never touch the data a demo run produced.
-- **Why no `DATABASE_URL` in `.env`?** It repeated the password and broke on `@ : / %` unless
-  encoded by hand. `URL.create()` builds it from the `POSTGRES_*` parts compose already uses.
-- **How does the password stay out of logs?** `SecretStr` masks `repr()`, `str(URL)` shows
-  `***`, and the engine uses `hide_parameters=True`.
-- **Why hand-written SQL migrations, no ORM / autogenerate?** There are no ORM models, so
-  autogenerate has nothing to compare. The DDL in migration 001 is the single source of truth
-  and reads like the schema in this plan.
+- **Why PostGIS in Docker instead of a local install?** One `docker compose up` gives the exact versions the brief names (PostgreSQL 16 / PostGIS 3.4) on any machine.
+- **Why `platform: linux/amd64`?** The official `postgis/postgis` image is amd64-only; on Apple Silicon it runs under emulation. Fine for <1000 rows, and stated so it isn't a surprise.
+- **Why mount the single init SQL file, not a folder?** A folder over `/docker-entrypoint-initdb.d` hides the image's own `10_postgis.sh`, so `iris` would get no PostGIS.
+- **Why a separate `iris_test` database?** The db tests truncate and rewrite tables; they must never touch the data a demo run produced.
+- **Why no `DATABASE_URL` in `.env`?** It repeated the password and broke on `@ : / %` unless encoded by hand. `URL.create()` builds it from the `POSTGRES_*` parts compose already uses.
+- **How does the password stay out of logs?** `SecretStr` masks `repr()`, `str(URL)` shows `***`, and the engine uses `hide_parameters=True`.
+- **Why hand-written SQL migrations, no ORM / autogenerate?** There are no ORM models, so autogenerate has nothing to compare. The DDL in migration 001 is the single source of truth and reads like the schema in this plan.
 - **Why one `op.execute()` per statement?** An error points at the failing statement.
-- **Why the Alembic version table in `iris_staging`?** A default `public.alembic_version`
-  would collide with other Alembic projects in a shared database.
-- **Why does `downgrade()` keep the `postgis` extension and the schema?** A migration only
-  removes what it alone created; other schemas may use PostGIS, and the schema holds Alembic's
-  own table.
-- **Why was migration 001 edited instead of adding 002?** It was never deployed anywhere; the
-  only database is the local demo one, rebuilt with `downgrade base && upgrade head`.
-- **Why no secondary indexes?** At <1000 rows a sequential scan is faster; the only index is
-  the one `ON CONFLICT` needs (`uq_source_record`).
-- **Why `ck_geometry_matches_status`?** It makes the database itself refuse a point without
-  `source_coordinates`, or that status without a point ("invalid coordinates are not silently
-  accepted").
-- **Why `extra="forbid"` on the config models?** A misspelt key (e.g. `keyowrds`) would
-  otherwise be ignored, leaving the filter empty and the run "succeeding" with zero matches.
-- **Why these config validators and no others?** Each one stops a mistake that would silently
-  produce wrong data (blank keyword matches everything, swapped bounding box rejects every
-  point, missing box fails only after the whole scrape).
-- **Why sync, not async?** It's a sequential, deliberately throttled crawler; async adds
-  complexity and gains nothing.
-- **Why `uv` and a committed `uv.lock`?** Every checkout resolves the same interpreter and
-  package versions.
+- **Why the Alembic version table in `iris_staging`?** A default `public.alembic_version` would collide with other Alembic projects in a shared database.
+- **Why does `downgrade()` keep the `postgis` extension and the schema?** A migration only removes what it alone created; other schemas may use PostGIS, and the schema holds Alembic's own table.
+- **Why was migration 001 edited instead of adding 002?** It was never deployed anywhere; the only database is the local demo one, rebuilt with `downgrade base && upgrade head`.
+- **Why no secondary indexes?** At <1000 rows a sequential scan is faster; the only index is the one `ON CONFLICT` needs (`uq_source_record`).
+- **Why `ck_geometry_matches_status`?** It makes the database itself refuse a point without `source_coordinates`, or that status without a point ("invalid coordinates are not silently accepted").
+- **Why `extra="forbid"` on the config models?** A misspelt key (e.g. `keyowrds`) would otherwise be ignored, leaving the filter empty and the run "succeeding" with zero matches.
+- **Why these config validators and no others?** Each one stops a mistake that would silently produce wrong data (blank keyword matches everything, swapped bounding box rejects every point, missing box fails only after the whole scrape).
+- **Why sync, not async?** It's a sequential, deliberately throttled crawler; async adds complexity and gains nothing.
 
 ---
 
@@ -474,90 +360,39 @@ def test_fetch_detail_failure_raises(): ...
 
 ### Choices You May Be Asked About
 
-- **Why httpx and no browser (Playwright)?** The live checks on 2026-10-27 showed every page
-  needed is a plain GET with the data in the HTML, including the state portal's map markers.
-  A browser would add a heavy dependency and a slower, flakier test setup for nothing.
-- **Why use the marker JSON instead of the listing cards?** `map.drawMarkers([...])` holds
-  *all* results with coordinates in one response; cards show only 10 per page. No paging is
-  needed, and the "von N" count / card count is checked against it (`count_mismatch`).
-- **Why use the marker `href` for the detail URL?** A wrong city in the path redirects to the
-  listing page instead of failing; the marker's own link is always right.
-- **Why fetch detail pages only for filter matches?** Only the detail page has the
-  "Zeitraum"; fetching it for non-matches would be wasted requests on a public portal.
-- **Why only 2 fixture files?** One real page per markup the code parses. Edge cases (empty
-  listing, malformed marker, count mismatch, HTTP errors) are small inline
-  snippets in the tests. `tests/fixtures/SOURCES.md` records where each page came from and
-  what the dropped pages showed.
-- **Why `Field(default_factory=list)` and not `= []`?** Pydantic copies `[]` defaults, so it
-  isn't a bug there, but the org rule forbids mutable defaults and `default_factory` is
-  correct everywhere (dataclasses too).
-- **Why is `geocode_status` a `Literal`?** It mirrors the migration's CHECK, so a typo fails in
-  Python with a clear error before the INSERT.
-- **Why are `lon`/`lat` `float | str | None` on `ScrapedRecord` but `float | None` on
-  `NormalisedRecord`?** The scraped record keeps values as the source gives them; turning them
-  into checked floats is the pipeline's job (Phase 3).
-- **Why no validators for "point only with `source_coordinates`" or "at least one keyword"?**
-  The database CHECKs already enforce both; repeating them in Python adds code to defend and
-  nothing else.
-- **Why are `ScrapeError` / `ScrapeResult` dataclasses, not pydantic?** They're built only by
-  our own code, so there's nothing to validate. `dataclasses.asdict()` turns an error into
-  JSON for `ingest_run.errors`.
-- **Why is `ScrapeError` frozen?** It records something that happened; nothing should change it
-  afterwards.
-- **Why is `ScrapeError.kind` a plain `str`?** No database CHECK constrains it, unlike
-  `geocode_status`; the allowed values are listed in a comment.
-- **Why no `BaseAdapter` class?** There is one source, the one the brief names. An abstract
-  base pays off when implementations are swapped or added; here it would only wrap one
-  function. The runner calls `sachsen_portal.scrape()` directly.
-- **Why does `scrape()` take the `httpx.Client` as a parameter?** So tests can pass a client
-  backed by `MockTransport`. The adapter never creates its own client.
-- **Why read the marker JSON with `raw_decode` instead of a regex?** A regex like
-  `\[.*?\]\);` would stop early if a title ever contained `]);`. `raw_decode` parses exactly
-  one JSON value and stops where it ends.
-- **Why does `parse_detail` check the body class `nbp-beteiligung-{id}`?** Found in testing:
-  listing cards carry the same Zeitraum element, so a detail URL redirected to a listing
-  (HTTP 200) would have given the row another procedure's dates. Now it gets no date and is
-  flagged `missing_publication_date`: wrong data is worse than missing data.
-- **Why does the count check compare with the cards or "von N"?** The marker JSON is the data
-  source; the number the page itself shows is an independent check that no results were lost.
-  A mismatch is recorded, not fatal: the markers are still the most complete list.
-- **Why is "cards but no markers" an error, but "no cards, no markers" not?** No cards means
-  the portal has no results, which is normal. Cards without markers means the page layout
-  changed and the adapter would silently return nothing.
-- **Why keep coordinates as given and check them later?** The adapter only reads; deciding
-  what is valid (bounding box, NaN) is one rule in the pipeline. Values of the
-  wrong JSON type (null, list) count as missing, with the original kept in `raw_data`.
-- **Why does `fetch_detail` let `FetchError` through?** A failed detail page isn't a scrape
-  error: the record is still usable. The pipeline keeps it and adds `detail_page_failed`.
-- **Why `source = "sachsen_portal"` as a module constant, not from the config `name`?** It is
-  the identifier stored in the database's natural key; it must not change if someone renames
-  the config entry.
-- **Why `tests/__init__.py`?** It lets test modules import helpers from `tests.conftest`
-  without mypy seeing the file under two module names.
-- **Why return errors instead of raising?** One bad marker must not stop the run; bad
-  entries are collected next to the good ones ("errors are visible").
-- **Why `SNIPPET_MAX_CHARS = 2048`?** Enough to see what was wrong with an entry without
-  bloating `ingest_run.errors`; one named constant instead of a bare 2048.
-- **Why one `fetch()` function for every request?** Listings and detail pages need the same
-  retry, 429 and delay rules; written once, tested once (`tests/test_fetch.py`).
-- **Why no retry library (tenacity) or httpx's `retries=`?** httpx's built-in retries cover
-  connection failures only, not 5xx or 429. tenacity would be a dependency to replace a short
-  loop that can be explained line by line.
-- **Which errors are retried?** Network errors and timeouts, 5xx and 429 can go away on their
-  own. Any other 4xx (404, 403) won't, so it fails at once and is recorded.
-- **What does `max_retries: 3` mean?** 3 retries after the first try, so at most 4 requests per
-  URL, waiting 2, 4, 8 s between them: about 14 s worst case per URL.
-- **Why honour only the seconds form of `Retry-After`?** The portal has never sent a 429;
-  parsing the date form would be code for a case never seen. It falls back to the backoff.
-- **Why does a retry wait only the backoff, not backoff plus polite delay?** The backoff is
-  already at least as long; adding both makes the waits harder to reason about and test.
-- **Why `follow_redirects=True`?** The state portal redirects a wrong-city detail URL to the
-  listing page; following it lets `parse_detail` see the page isn't the record's own and flag
-  the row, instead of failing on a 302.
-- **Why `make_client()`?** One place sets the user agent, timeout and redirects. Tests build
-  their client with it too (passing a `MockTransport`), so they run with production settings.
-- **How do the tests avoid real sleeps?** They replace `time.sleep` in `fetch.py` with a list
-  recorder: tests run instantly and can assert the exact waits (e.g. `Retry-After: 5` -> 5 s).
+- **Why httpx and no browser (Playwright)?** The live checks on 2026-10-27 showed every page needed is a plain GET with the data in the HTML, including the state portal's map markers. A browser would add a heavy dependency and a slower, flakier test setup for nothing.
+- **Why use the marker JSON instead of the listing cards?** `map.drawMarkers([...])` holds *all* results with coordinates in one response; cards show only 10 per page. No paging is needed, and the "von N" count / card count is checked against it (`count_mismatch`).
+- **Why use the marker `href` for the detail URL?** A wrong city in the path redirects to the listing page instead of failing; the marker's own link is always right.
+- **Why fetch detail pages only for filter matches?** Only the detail page has the "Zeitraum"; fetching it for non-matches would be wasted requests on a public portal.
+- **Why only 2 fixture files?** One real page per markup the code parses. Edge cases (empty listing, malformed marker, count mismatch, HTTP errors) are small inline snippets in the tests. `tests/fixtures/SOURCES.md` records where each page came from and what the dropped pages showed.
+- **Why `Field(default_factory=list)` and not `= []`?** Pydantic copies `[]` defaults, so it isn't a bug there, but the org rule forbids mutable defaults and `default_factory` is correct everywhere (dataclasses too).
+- **Why is `geocode_status` a `Literal`?** It mirrors the migration's CHECK, so a typo fails in Python with a clear error before the INSERT.
+- **Why are `lon`/`lat` `float | str | None` on `ScrapedRecord` but `float | None` on `NormalisedRecord`?** The scraped record keeps values as the source gives them; turning them into checked floats is the pipeline's job (Phase 3).
+- **Why no validators for "point only with `source_coordinates`" or "at least one keyword"?** The database CHECKs already enforce both; repeating them in Python adds code to defend and nothing else.
+- **Why are `ScrapeError` / `ScrapeResult` dataclasses, not pydantic?** They're built only by our own code, so there's nothing to validate. `dataclasses.asdict()` turns an error into JSON for `ingest_run.errors`.
+- **Why is `ScrapeError` frozen?** It records something that happened; nothing should change it afterwards.
+- **Why is `ScrapeError.kind` a plain `str`?** No database CHECK constrains it, unlike `geocode_status`; the allowed values are listed in a comment.
+- **Why no `BaseAdapter` class?** There is one source, the one the brief names. An abstract base pays off when implementations are swapped or added; here it would only wrap one function. The runner calls `sachsen_portal.scrape()` directly.
+- **Why does `scrape()` take the `httpx.Client` as a parameter?** So tests can pass a client backed by `MockTransport`. The adapter never creates its own client.
+- **Why read the marker JSON with `raw_decode` instead of a regex?** A regex like `\[.*?\]\);` would stop early if a title ever contained `]);`. `raw_decode` parses exactly one JSON value and stops where it ends.
+- **Why does `parse_detail` check the body class `nbp-beteiligung-{id}`?** Found in testing: listing cards carry the same Zeitraum element, so a detail URL redirected to a listing (HTTP 200) would have given the row another procedure's dates. Now it gets no date and is flagged `missing_publication_date`: wrong data is worse than missing data.
+- **Why does the count check compare with the cards or "von N"?** The marker JSON is the data source; the number the page itself shows is an independent check that no results were lost. A mismatch is recorded, not fatal: the markers are still the most complete list.
+- **Why is "cards but no markers" an error, but "no cards, no markers" not?** No cards means the portal has no results, which is normal. Cards without markers means the page layout changed and the adapter would silently return nothing.
+- **Why keep coordinates as given and check them later?** The adapter only reads; deciding what is valid (bounding box, NaN) is one rule in the pipeline. Values of the wrong JSON type (null, list) count as missing, with the original kept in `raw_data`.
+- **Why does `fetch_detail` let `FetchError` through?** A failed detail page isn't a scrape error: the record is still usable. The pipeline keeps it and adds `detail_page_failed`.
+- **Why `source = "sachsen_portal"` as a module constant, not from the config `name`?** It is the identifier stored in the database's natural key; it must not change if someone renames the config entry.
+- **Why `tests/__init__.py`?** It lets test modules import helpers from `tests.conftest` without mypy seeing the file under two module names.
+- **Why return errors instead of raising?** One bad marker must not stop the run; bad entries are collected next to the good ones ("errors are visible").
+- **Why `SNIPPET_MAX_CHARS = 2048`?** Enough to see what was wrong with an entry without bloating `ingest_run.errors`; one named constant instead of a bare 2048.
+- **Why one `fetch()` function for every request?** Listings and detail pages need the same retry, 429 and delay rules; written once, tested once (`tests/test_fetch.py`).
+- **Why no retry library (tenacity) or httpx's `retries=`?** httpx's built-in retries cover connection failures only, not 5xx or 429. tenacity would be a dependency to replace a short loop that can be explained line by line.
+- **Which errors are retried?** Network errors and timeouts, 5xx and 429 can go away on their own. Any other 4xx (404, 403) won't, so it fails at once and is recorded.
+- **What does `max_retries: 3` mean?** 3 retries after the first try, so at most 4 requests per URL, waiting 2, 4, 8 s between them: about 14 s worst case per URL.
+- **Why honour only the seconds form of `Retry-After`?** The portal has never sent a 429; parsing the date form would be code for a case never seen. It falls back to the backoff.
+- **Why does a retry wait only the backoff, not backoff plus polite delay?** The backoff is already at least as long; adding both makes the waits harder to reason about and test.
+- **Why `follow_redirects=True`?** The state portal redirects a wrong-city detail URL to the listing page; following it lets `parse_detail` see the page isn't the record's own and flag the row, instead of failing on a 302.
+- **Why `make_client()`?** One place sets the user agent, timeout and redirects. Tests build their client with it too (passing a `MockTransport`), so they run with production settings.
+- **How do the tests avoid real sleeps?** They replace `time.sleep` in `fetch.py` with a list recorder: tests run instantly and can assert the exact waits (e.g. `Retry-After: 5` -> 5 s).
 
 ---
 
