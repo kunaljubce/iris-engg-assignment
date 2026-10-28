@@ -7,7 +7,7 @@ Saxony citizen participation portals, filters for industrial/commercial hearings
 the data, and loads it into a PostGIS-backed `iris_staging.signal_ingest` table with
 idempotent upserts and full auditability.
 
-**Scope:** Dresden and Leipzig city portals only; surrounding districts deferred.
+**Scope:** Dresden and Leipzig only; surrounding districts deferred.
 
 **This is a sample solution for an exercise, not a production system.** The repo matters for
 a few weeks and is demonstrated from a fresh database. Add something only if it serves the
@@ -88,24 +88,25 @@ All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, pr
 
 - `docker compose up` starts PostgreSQL 16 / PostGIS 3.4.
 - `alembic upgrade head` creates `iris_staging` schema, `signal_ingest` + `ingest_run` tables, PostGIS extension.
-- `python -m harvester run` scrapes both sources (state portal per city and status), filters, upserts, and writes a quality report.
-- `pytest` passes with 100% of HTML-fixture tests, including idempotent re-run and duplicate detection.
-- A quality report (stdout + queryable `ingest_run` table) shows counts, errors, match rates.
+- `harvester run` scrapes both sources (state portal per city and status), filters, upserts, and records each run in `ingest_run`.
+- `pytest` passes, including idempotent re-run and duplicate detection, with no network access.
+- `harvester report` prints the quality report from the database: the latest run per source with counts and errors, and the stored records by geocode status and quality flag.
 
 ### Verification
 
 ```bash
 # Automated
-pytest --tb=short -q
-ruff check .
-mypy .
+uv run pytest --tb=short -q
+uv run ruff check .
+uv run mypy .
 
 # Manual
 docker compose up -d
-alembic upgrade head
-python -m harvester run --dry-run   # prints normalised records, no DB write
-python -m harvester run             # full ingest
-docker compose exec -T db psql -U iris -d iris < sql/validation_queries.sql
+uv run alembic upgrade head
+uv run harvester run --dry-run   # prints every record with its filter decision, no DB write
+uv run harvester run             # full ingest
+uv run harvester report          # quality report
+docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 ```
 
 ---
@@ -137,7 +138,7 @@ docker compose exec -T db psql -U iris -d iris < sql/validation_queries.sql
   copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the
   `db`-marked tests run every query against it.
 - Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent
-  re-runs, not fast ones, and a full live run is ~20 requests (~1 minute).
+  re-runs, not fast ones, and a full live run is ~14 requests (under a minute).
 - Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The
   brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees
   on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
