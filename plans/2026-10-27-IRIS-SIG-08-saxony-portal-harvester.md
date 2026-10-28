@@ -149,7 +149,7 @@ docker compose exec -T db psql -U iris -d iris < sql/validation_queries.sql
 - Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an
   index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
 - Deleting rows that vanish from a portal or stop matching the filter. They stay, with an
-  older `ingest_run_id` (validation query 7).
+  older `ingest_run_id` (validation check 9).
 
 ---
 
@@ -464,7 +464,7 @@ obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one
 
 **Rows are never deleted.** A plan that disappears from a portal, or stops matching after the
 keyword list changes, keeps its row; its `ingest_run_id` then points at an older run than the
-latest one for its source (validation query 7 lists these).
+latest one covering its city (validation check 9 lists these).
 
 ---
 
@@ -552,7 +552,7 @@ pipeline sets `geocode_status` per record:
 `settings.yml` **before** they reach the database. Rejected rows are stored with
 `geometry = NULL` and the raw values in `raw_data`, never with the bad point. The check is
 written as "inside" (`min <= v <= max`), so NaN fails it too. `ck_geometry_matches_status`
-makes the database refuse a point without `source_coordinates`. Validation query 9 re-checks
+makes the database refuse a point without `source_coordinates`. Validation check 6 re-checks
 stored geometries in SQL.
 
 **Transform:** in SQL, `ST_Transform(ST_SetSRID(ST_MakePoint(lon, lat), 4326), 25832)` in the
@@ -712,7 +712,7 @@ finished; city portal, im Verfahren). These are stored as **separate rows** with
 `source` values: each portal's record is a signal in its own right, with its own URL.
 
 Potential matching strategy (not implemented, documented for future work):
-- Match on city + plan number from the title ("Nr. 911", "Nummer 320"); validation query 6
+- Match on city + plan number from the title ("Nr. 911", "Nummer 320"); validation check 10
   lists these pairs.
 - A future `iris_staging.signal_match` table could link `source_record_id` pairs.
 
@@ -1663,65 +1663,42 @@ Built differently from the first draft of this plan:
 - Tables instead of labelled blocks per run; no run ID, finish time, filtered-out count or
   match percentage (scraped and industrial sit side by side; the rest is in `ingest_run`).
 
-#### 2. `sql/validation_queries.sql`
+#### 2. `sql/validation_queries.sql` ✅
 
-```sql
--- 1. Total records by source and city
-SELECT source, city, count(*) FROM iris_staging.signal_ingest GROUP BY 1, 2;
+10 checks, each headed by an `\echo` so the output of
+`docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql` is
+readable. Checks marked "expect 0 rows" are violations when they return anything.
 
--- 2. Quality flag distribution
-SELECT unnest(quality_flags) AS flag, count(*)
-FROM iris_staging.signal_ingest GROUP BY 1 ORDER BY 2 DESC;
+| # | Check | Criterion it serves |
+|---|---|---|
+| 1 | Latest run per source: status and counts | errors visible |
+| 2 | Run errors by kind, from `ingest_run.errors` | errors visible |
+| 3 | Records by source, city, geocode status, with point / date | missing fields visible |
+| 4 | Quality flag counts | missing fields visible |
+| 5 | Records without a point, with `geocode_reason` | missing fields visible |
+| 6 | Points outside the bounding box of the run that wrote them (expect 0) | invalid coordinates not silently accepted |
+| 7 | Points in EPSG:25832 and back in WGS84 | valid staging records |
+| 8 | Each record with its run, source URL and filter evidence | traceable records; filtering |
+| 9 | Stale records: not written by the latest completed run covering their city | traceable records |
+| 10 | The same plan on both portals (city + plan number) | documents the source overlap |
 
--- 3. Geocode status distribution
-SELECT geocode_status, count(*) FROM iris_staging.signal_ingest GROUP BY 1;
+Live results on 2026-10-28: the "expect 0" checks return 0 rows; check 10 finds Leipzig
+Nr. 911 on both portals. Check 6 was also tested by moving one point to Berlin inside a
+rolled-back transaction: it returned that row.
 
--- 4. Records with NULL geometry
-SELECT source, source_record_id, title, geocode_status, geocode_reason
-FROM iris_staging.signal_ingest WHERE geometry IS NULL;
-
--- 5. Most recent ingest runs (filtered_out vs inserted + updated is the match rate)
-SELECT id, source, city, status, records_scraped, records_filtered_out,
-       records_rejected, records_inserted, records_updated,
-       jsonb_array_length(errors) AS errors, started_at, finished_at
-FROM iris_staging.ingest_run ORDER BY started_at DESC LIMIT 10;
-
--- 6. Possible cross-source duplicates: same city + plan number on both portals
---    (titles differ in punctuation, e.g. Nr. 911; documented, not merged)
-SELECT city, substring(title FROM '(?:Nr\.|Nummer)\s*(\d+(?:\.\d+)?)') AS plan_number,
-       array_agg(source || ':' || source_record_id) AS records
-FROM iris_staging.signal_ingest
-GROUP BY 1, 2
-HAVING count(DISTINCT source) > 1;
-
--- 7. Stale rows: not written by the latest completed run that covered their city.
---    A run's city is NULL when it covered all the source's cities; comparing with the
---    source's latest run alone would list every Leipzig row after `--city dresden`
-SELECT s.source, s.source_record_id, s.city, s.title, s.updated_at
-FROM iris_staging.signal_ingest s
-WHERE s.ingest_run_id <> (
-    SELECT r.id FROM iris_staging.ingest_run r
-    WHERE r.source = s.source AND r.status = 'completed'
-      AND (r.city IS NULL OR r.city = s.city)
-    ORDER BY r.started_at DESC LIMIT 1
-);
-
--- 8. Keyword match distribution
-SELECT unnest(matched_keywords) AS keyword, count(*)
-FROM iris_staging.signal_ingest
-GROUP BY 1 ORDER BY 2 DESC;
-
--- 9. Geometry bounding box check (should return 0 rows)
-SELECT source_record_id, title, ST_AsText(geometry),
-       ST_X(ST_Transform(geometry, 4326)) AS lon,
-       ST_Y(ST_Transform(geometry, 4326)) AS lat
-FROM iris_staging.signal_ingest
-WHERE geometry IS NOT NULL
-  AND NOT ST_Within(
-    ST_Transform(geometry, 4326),
-    ST_MakeEnvelope(12.0, 50.8, 14.2, 51.5, 4326)
-  );
-```
+Built differently from the first draft of this plan:
+- Check 6 reads each city's box from the `config_snapshot` of the run that wrote the row,
+  instead of one hardcoded Saxony envelope: it checks against the config actually used,
+  with no second copy of the boxes to keep in sync.
+- Check 9 compares with the latest run covering the row's city (`r.city IS NULL OR
+  r.city = s.city`); see the choice below.
+- Added check 8 (traceability, which also shows the filter evidence). Dropped the keyword
+  distribution, which serves no acceptance criterion, and the duplicate-key and
+  point-vs-status checks: `uq_source_record` and `ck_geometry_matches_status` make both
+  impossible, so the checks could only ever return 0 rows. Idempotency shows in the
+  re-run counts (check 1: 0 inserted).
+- The README's inline queries moved here; the README lists the checks with the expected
+  live results.
 
 #### 3. `sample_output/signal_ingest_sample.csv` and `sample_output/signal_ingest_sample.geojson`
 
@@ -1746,7 +1723,7 @@ Full README covering:
 - Configuration (`settings.yml`, environment variables)
 - Architecture overview (adapters, pipeline, DB)
 - Testing (`pytest`)
-- Validation (`psql -f sql/validation_queries.sql`)
+- Validation (`sql/validation_queries.sql` via `psql`)
 - Data source and access: both portals, public GET pages only, verified 2026-10-27
 - Mapping assumptions: publication date = "Zeitraum" start; marker coordinates as the
   procedure location; Leipzig city portal limited to "im Verfahren"
@@ -1773,7 +1750,7 @@ made in one test transaction would otherwise have the same time.
 Decided in this plan; confirm or update each one as the step is built.
 
 - **Why are the two portals' copies of the same plan separate rows?** Each is a signal with its
-  own URL and source ID; merging them is future work. Validation query 6 lists the pairs by
+  own URL and source ID; merging them is future work. Validation check 10 lists the pairs by
   city and plan number (e.g. Nr. 911).
 - **Why EPSG:25832 although both cities lie east of 12° E?** The brief requires it; it's usable
   there with growing scale distortion, documented in the README.
@@ -1793,6 +1770,14 @@ Decided in this plan; confirm or update each one as the step is built.
   works at any time, after any run or a crash, and checks what was actually committed.
 - **Why export samples with SQL rather than a Python command?** It's two queries, needs no
   new code to test or defend, and is repeatable by anyone with `psql`.
+- **Why does the bounding-box check read the boxes from `config_snapshot`?** It checks
+  each point against the config the run actually used. A hardcoded box in SQL would be a
+  second copy of `settings.yml` that can drift, and a changed box would wrongly flag
+  older rows.
+- **Why no duplicate-key check?** `uq_source_record` makes duplicates impossible, so the
+  check could never fail; the re-run counts (0 inserted) and the idempotency tests show it.
+- **Why are the validation checks SQL and not tests?** They check the real data after a
+  live run, which the fixture tests can't see; anyone can run them with `psql`.
 - **Why does the stale-rows query match the run's city?** A `--city dresden` run doesn't
   touch Leipzig rows; without the city condition they would all look stale.
 
@@ -1806,7 +1791,8 @@ Decided in this plan; confirm or update each one as the step is built.
 
 #### Manual Verification
 - [ ] README instructions produce a working setup from scratch
-- [ ] `sql/validation_queries.sql` runs against populated DB and returns sensible results
+- [x] `sql/validation_queries.sql` runs against populated DB and returns sensible results
+  (live, 2026-10-28)
 - [ ] Sample CSV and GeoJSON open correctly in QGIS / geojson.io
 - [ ] Quality report identifies any data issues
 

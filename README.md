@@ -135,58 +135,31 @@ Quality flags
 
 ### Check the results in the database
 
-Open a SQL shell with `docker compose exec db psql -U iris -d iris`.
+`sql/validation_queries.sql` holds 10 checks on the stored data. Run them all with:
 
-```sql
--- 1. The tables exist
-\dt iris_staging.*
-
--- 2. The run log: one row per source per run. city is NULL when the run covers several cities
-SELECT source, city, status, records_scraped, records_filtered_out, records_rejected,
-       records_inserted, records_updated, jsonb_array_length(errors) AS errors,
-       finished_at - started_at AS took
-FROM iris_staging.ingest_run
-ORDER BY started_at DESC;
-
--- 3. Records by source, city and geocode status
-SELECT source, city, geocode_status, count(*),
-       count(geometry) AS with_point, count(publication_date) AS with_date
-FROM iris_staging.signal_ingest
-GROUP BY 1, 2, 3
-ORDER BY 1, 2;
-
--- 4. Points are stored in EPSG:25832; transformed back to WGS84 they should be in the city
-SELECT source_record_id, left(title, 50) AS title, publication_date,
-       ST_AsText(geometry) AS point_25832,
-       ST_AsText(ST_Transform(geometry, 4326)) AS point_wgs84,
-       matched_keywords, quality_flags
-FROM iris_staging.signal_ingest
-WHERE geometry IS NOT NULL;
-
--- 5. No key is stored twice (expect 0 rows)
-SELECT source, source_record_id, count(*)
-FROM iris_staging.signal_ingest
-GROUP BY 1, 2
-HAVING count(*) > 1;
-
--- 6. Why a record matched, and why it has no point
-SELECT title, geocode_reason, quality_flags, raw_data->'filter_evidence' AS evidence
-FROM iris_staging.signal_ingest
-WHERE source = 'leipzig_stadtportal'
-LIMIT 3;
+```bash
+docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 ```
 
-What to expect after the first run (live data on 2026-10-28):
+| # | Check | Expect after the first run (live data on 2026-10-28) |
+|---|---|---|
+| 1 | Latest run per source: status and counts | `sachsen_portal`: 83 scraped, 9 inserted; `leipzig_stadtportal`: 39 scraped, 10 inserted; both `completed` |
+| 2 | Run errors by kind | 0 rows |
+| 3 | Records by source, city and geocode status | `sachsen_portal`: Dresden 7, Leipzig 2, all with point and date; `leipzig_stadtportal`: 10, all `unresolved` |
+| 4 | Quality flags | `missing_publication_date` on the 10 `leipzig_stadtportal` rows |
+| 5 | Records without a point, and why | the 10 `leipzig_stadtportal` rows: "source gives district only: …" |
+| 6 | Points outside the bounding box of the run that wrote them | 0 rows |
+| 7 | Points in EPSG:25832 and back in WGS84 | 9 rows, SRID 25832; Dresden about 13.8°E / 51.0°N |
+| 8 | Each record with its run, source URL and filter evidence | 19 rows |
+| 9 | Records not written by the latest run covering their city | 0 rows |
+| 10 | The same plan on both portals | Leipzig Nr. 911 on both, kept as separate signals |
 
-- **Run log (query 2):** `sachsen_portal` scraped 83 and inserted 9; `leipzig_stadtportal`
-  scraped 39 and inserted 10. Both runs are `completed` with 0 errors.
-- **Records (query 3):** for `sachsen_portal`, Dresden 7 and Leipzig 2, all with a point and
-  a date. For `leipzig_stadtportal`, 10 rows, all `unresolved` with no date: the register
-  gives districts only.
-- **Points (query 4):** EPSG:25832 values are around 835000 / 5665000 m, and the WGS84 values
-  around 13.8°E / 51.0°N for Dresden.
-- **Re-run:** run `uv run harvester run` again. Query 2 should show 0 inserted and
-  9 / 10 updated, and `SELECT count(*) FROM iris_staging.signal_ingest;` should still be 19.
+Duplicate keys and a point without `source_coordinates` aren't checked here: the
+database's constraints make them impossible. To check idempotency, run
+`uv run harvester run` again: check 1 should show 0 inserted and 9 / 10 updated, and the
+record count should stay at 19.
+
+To run a single query, open a SQL shell with `docker compose exec db psql -U iris -d iris`.
 
 ### Stop or reset the database
 
