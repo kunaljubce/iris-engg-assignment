@@ -82,6 +82,57 @@ line per source (scraped, filtered out, rejected, inserted, updated, errors). Th
 exits with code 1 if any run failed. Re-running is safe: records are upserted on
 `(source, source_record_id)`, so a second run updates rows and adds none.
 
+### Quality report
+
+```bash
+# Print the quality report from the database (also: uv run python -m harvester report)
+uv run harvester report
+```
+
+The report reads only from the database, so it can be run at any time, also after a
+failed run. Output after the first run (live data on 2026-10-28):
+
+```
+IRIS-SIG-08 quality report
+
+Latest runs
+  source               city     status     started (UTC)     scraped  industrial  rejected  inserted  updated  errors
+  leipzig_stadtportal  leipzig  completed  2026-10-28 07:47       39          10         0        10        0       0
+  sachsen_portal       all      completed  2026-10-28 07:46       83           9         0         9        0       0
+
+Run errors
+  none
+
+Stored records
+  source               city     records  with point  unresolved  rejected bbox
+  leipzig_stadtportal  leipzig       10           0          10              0
+  sachsen_portal       dresden        7           7           0              0
+  sachsen_portal       leipzig        2           2           0              0
+
+Quality flags
+  source               city     flag                      records
+  leipzig_stadtportal  leipzig  missing_publication_date       10
+```
+
+- **Latest runs:** the most recent run of each source, from `iris_staging.ingest_run`.
+  `city` is `all` when the run covered all the source's cities.
+  - `scraped`: records read from the portal
+  - `industrial`: records that passed the industrial keyword filter
+  - `rejected`: records that couldn't be used (e.g. no ID or title)
+  - `inserted` / `updated`: new rows / existing rows rewritten
+  - `errors`: errors recorded for the run
+- **Run errors:** the latest runs' errors counted by kind, with one example message each.
+  A failed run's message is listed as `run_failed`; the full list is in
+  `ingest_run.errors`.
+- **Stored records:** everything in `iris_staging.signal_ingest`, from all runs, by
+  source and city.
+  - `with point`: records with a geometry
+  - `unresolved`: no coordinates in the source
+  - `rejected bbox`: coordinates outside the city's bounding box or not valid numbers, so
+    no point is stored
+- **Quality flags:** how many stored records carry each flag, e.g.
+  `missing_publication_date`.
+
 ### Check the results in the database
 
 Open a SQL shell with `docker compose exec db psql -U iris -d iris`.
