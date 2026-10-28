@@ -10,9 +10,6 @@ from dataclasses import dataclass, field
 
 from harvester.config import IndustrialFilterConfig
 
-# Marks a Leipzig Thema match in matched_keywords, e.g. "thema:Gewerbe"
-THEMA_PREFIX = "thema:"
-
 
 @dataclass(frozen=True)
 class FilterResult:
@@ -28,11 +25,9 @@ class IndustrialFilter:
             *((kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in config.keywords),
             *((tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in config.case_sensitive_tokens),
         ]
-        self._thema_signals = set(config.thema_signals)
 
-    def check(self, title: str, thema: list[str]) -> FilterResult:
-        # A Leipzig row can carry several Thema values ("Wohnen", "Gewerbe", ...)
-        keywords = [f"{THEMA_PREFIX}{t}" for t in thema if t in self._thema_signals]
+    def check(self, title: str) -> FilterResult:
+        keywords: list[str] = []
         evidence: list[str] = []
         for keyword, pattern in self._patterns:
             hits = pattern.findall(title)

@@ -7,10 +7,10 @@ import httpx
 from pydantic import ValidationError
 
 from harvester.adapters.fetch import make_client
-from harvester.config import HarvesterConfig, LeipzigStadtSource, SachsenSource, load_config
+from harvester.config import HarvesterConfig, SachsenSource, load_config
 from harvester.db.engine import DatabaseConfigError, make_engine
 from harvester.report import quality_report
-from harvester.runner import RunSummary, Source, run_source, scrape_and_normalise
+from harvester.runner import RunSummary, run_source, scrape_and_normalise
 
 
 @click.group()
@@ -66,7 +66,7 @@ def report() -> None:
 
 def select_sources(
     config: HarvesterConfig, source_name: str | None, city: str | None
-) -> list[Source]:
+) -> list[SachsenSource]:
     """The configured sources, narrowed to --source and --city. An unknown name is an error,
     not an empty run."""
     sources = config.sources
@@ -78,20 +78,17 @@ def select_sources(
     if city is None:
         return list(sources)
 
-    selected: list[Source] = []
+    selected: list[SachsenSource] = []
     for source in sources:
-        if isinstance(source, SachsenSource):
-            cities = [c for c in source.cities if c.slug == city]
-            if cities:
-                selected.append(source.model_copy(update={"cities": cities}))
-        elif isinstance(source, LeipzigStadtSource) and city in source.city_slugs:
-            selected.append(source)
+        cities = [c for c in source.cities if c.slug == city]
+        if cities:
+            selected.append(source.model_copy(update={"cities": cities}))
     if not selected:
         raise click.BadParameter(f"no selected source covers city {city!r}")
     return selected
 
 
-def _print_dry_run(client: httpx.Client, source: Source, config: HarvesterConfig) -> None:
+def _print_dry_run(client: httpx.Client, source: SachsenSource, config: HarvesterConfig) -> None:
     scraped, normalised = scrape_and_normalise(client, source, config)
     kept = {r.source_record_id: r for r in normalised.records}
     click.echo(

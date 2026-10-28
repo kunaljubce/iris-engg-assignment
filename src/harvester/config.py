@@ -96,20 +96,6 @@ class SachsenSource(_StrictModel):
         return [city.slug for city in self.cities]
 
 
-class LeipzigStadtSource(_StrictModel):
-    type: Literal["leipzig_stadt"]
-    name: str
-    base_url: str
-    listing_path: str
-    # tx_lepurpose[filter][89][] value for "im Verfahren"
-    status_filter_id: int
-
-    @property
-    def city_slugs(self) -> list[str]:
-        # The city portal only covers Leipzig
-        return ["leipzig"]
-
-
 class ScrapingConfig(_StrictModel):
     request_delay_seconds: float
     max_retries: int
@@ -121,7 +107,6 @@ class ScrapingConfig(_StrictModel):
 class IndustrialFilterConfig(_StrictModel):
     keywords: list[NonEmptyStr] = Field(min_length=1)
     case_sensitive_tokens: list[NonEmptyStr]
-    thema_signals: list[NonEmptyStr]
 
 
 class BoundingBox(_StrictModel):
@@ -150,7 +135,7 @@ class BoundingBox(_StrictModel):
 
 
 class HarvesterConfig(_StrictModel):
-    sources: list[SachsenSource | LeipzigStadtSource]
+    sources: list[SachsenSource]
     scraping: ScrapingConfig
     industrial_filter: IndustrialFilterConfig
     bounding_boxes: dict[str, BoundingBox]

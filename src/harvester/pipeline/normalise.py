@@ -1,6 +1,6 @@
 """ScrapedRecords to NormalisedRecords: filter, detail page, date, coordinates, flags.
 
-Per record: filter on the listing data -> (state portal, match only) fetch the detail page
+Per record: filter on the listing data -> (match only) fetch the detail page
 -> publication date from its "Zeitraum" -> coordinate check. Non-matches are dropped and
 counted. Problems never drop a match; they become quality flags or a geocode reason.
 """
@@ -12,12 +12,12 @@ from datetime import date
 
 import httpx
 
-from harvester.adapters import leipzig_stadtportal, sachsen_portal
+from harvester.adapters import sachsen_portal
 from harvester.adapters.fetch import FetchError
 from harvester.config import HarvesterConfig
 from harvester.models import NormalisedRecord, ScrapedRecord
 from harvester.pipeline.filter import IndustrialFilter
-from harvester.pipeline.geocode import GeocodeResult, check_coordinates
+from harvester.pipeline.geocode import check_coordinates
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def normalise(
     result = NormaliseResult()
 
     for record in scraped:
-        match = industrial_filter.check(record.title, record.thema)
+        match = industrial_filter.check(record.title)
         if not match.is_industrial:
             result.filtered_out += 1
             continue
@@ -48,20 +48,21 @@ def normalise(
         flags: list[str] = []
         raw_data = {**record.raw_data, "filter_evidence": match.evidence}
 
-        if record.source == sachsen_portal.SOURCE:
-            try:
-                record = sachsen_portal.fetch_detail(client, record, config.scraping)
-            except FetchError as exc:
-                logger.warning("detail page failed for %s: %s", record.detail_url, exc.message)
-                flags.append("detail_page_failed")
-                raw_data["detail_error"] = exc.message
-            raw_data["zeitraum"] = record.zeitraum
+        try:
+            record = sachsen_portal.fetch_detail(client, record, config.scraping)
+        except FetchError as exc:
+            logger.warning("detail page failed for %s: %s", record.detail_url, exc.message)
+            flags.append("detail_page_failed")
+            raw_data["detail_error"] = exc.message
+        raw_data["zeitraum"] = record.zeitraum
 
         publication_date, date_flag = parse_publication_date(record.zeitraum)
         if date_flag:
             flags.append(date_flag)
 
-        geocode = _geocode(record, config)
+        geocode = check_coordinates(
+            record.lon, record.lat, record.city, config.bounding_boxes[record.city]
+        )
         if geocode.status != "source_coordinates" and not record.location_text:
             flags.append("missing_location")
 
@@ -99,17 +100,3 @@ def parse_publication_date(zeitraum: str | None) -> tuple[date | None, str | Non
         return date(year, month, day), None
     except ValueError:  # e.g. 31.02.2026
         return None, "unparseable_date"
-
-
-def _geocode(record: ScrapedRecord, config: HarvesterConfig) -> GeocodeResult:
-    if record.source == leipzig_stadtportal.SOURCE:
-        # The city portal never gives coordinates; a district is an area, not a point
-        reason = (
-            f"source gives district only: {record.location_text}"
-            if record.location_text
-            else "source gives no location"
-        )
-        return GeocodeResult(None, None, "unresolved", reason)
-    return check_coordinates(
-        record.lon, record.lat, record.city, config.bounding_boxes[record.city]
-    )

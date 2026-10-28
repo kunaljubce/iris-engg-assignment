@@ -7,12 +7,12 @@ from uuid import UUID
 import pytest
 from sqlalchemy import Connection, Engine, text
 
-from harvester.adapters import leipzig_stadtportal, sachsen_portal
-from harvester.config import HarvesterConfig, LeipzigStadtSource, SachsenSource
+from harvester.adapters import sachsen_portal
+from harvester.config import HarvesterConfig, SachsenSource
 from harvester.db.upsert import upsert_records
 from harvester.runner import run_source
 from tests.conftest import MockClient, load_fixture
-from tests.test_leipzig_adapter import row, table
+from tests.test_sachsen_adapter import marker, markers_page
 
 pytestmark = pytest.mark.db
 
@@ -22,25 +22,19 @@ GEWERBEGEBIET_FLUGHAFEN, GEWERBEPARK_WEISSIG = "1066719", "1033966"
 OTHER_MATCHES = ["1034723", "1054740", "1065790"]
 
 
-def sources(config: HarvesterConfig) -> tuple[SachsenSource, LeipzigStadtSource]:
-    sachsen, leipzig = config.sources
-    assert isinstance(sachsen, SachsenSource) and isinstance(leipzig, LeipzigStadtSource)
-    # One listing (Dresden, finished plans): the one captured as a fixture
-    sachsen = sachsen.model_copy(
-        update={"cities": sachsen.cities[:1], "status_filters": ["BEENDETE"]}
-    )
-    return sachsen, leipzig
+def dresden_finished(config: HarvesterConfig) -> SachsenSource:
+    """The source narrowed to one listing (Dresden, finished plans): the one captured as a
+    fixture."""
+    [sachsen] = config.sources
+    return sachsen.model_copy(update={"cities": sachsen.cities[:1], "status_filters": ["BEENDETE"]})
 
 
 def portal_routes(config: HarvesterConfig) -> dict[str, str | int]:
-    sachsen, leipzig = sources(config)
+    sachsen = dresden_finished(config)
     detail_page = load_fixture("sachsen_dresden_detail.html")
     routes: dict[str, str | int] = {
         sachsen_portal.listing_url(sachsen, "dresden", "BEENDETE"): load_fixture(
             "sachsen_dresden_listing_beendet.html"
-        ),
-        leipzig_stadtportal.listing_url(leipzig): load_fixture(
-            "leipzig_stadt_listing_im_verfahren.html"
         ),
         # This record's own detail page: the fixture with its id in the body class
         DETAIL.format(GEWERBEGEBIET_FLUGHAFEN): detail_page.replace(
@@ -53,10 +47,6 @@ def portal_routes(config: HarvesterConfig) -> dict[str, str | int]:
     return routes
 
 
-def run_all(engine: Engine, client: Any, config: HarvesterConfig) -> list[Any]:
-    return [run_source(engine, client, source, config) for source in sources(config)]
-
-
 def query(engine: Engine, sql: str) -> list[Any]:
     with engine.connect() as conn:
         return list(conn.execute(text(sql)))
@@ -67,19 +57,13 @@ def test_full_pipeline_fixture_to_db(
 ) -> None:
     client = mock_client(portal_routes(harvester_config))
 
-    sachsen, leipzig = run_all(db_engine, client, harvester_config)
+    summary = run_source(db_engine, client, dresden_finished(harvester_config), harvester_config)
 
-    assert (sachsen.status, sachsen.scraped, sachsen.filtered_out, sachsen.inserted) == (
+    assert (summary.status, summary.scraped, summary.filtered_out, summary.inserted) == (
         "completed",
         52,
         47,
         5,
-    )
-    assert (leipzig.status, leipzig.scraped, leipzig.filtered_out, leipzig.inserted) == (
-        "completed",
-        39,
-        29,
-        10,
     )
     runs = query(
         db_engine,
@@ -87,7 +71,6 @@ def test_full_pipeline_fixture_to_db(
         " ORDER BY source",
     )
     assert [(r.source, r.city, r.status, r.records_inserted) for r in runs] == [
-        ("leipzig_stadtportal", "leipzig", "completed", 10),
         # Limited to Dresden here; a run over both cities stores NULL
         ("sachsen_portal", "dresden", "completed", 5),
     ]
@@ -103,7 +86,7 @@ def test_full_pipeline_fixture_to_db(
             " ON r.id = s.ingest_run_id",
         )
     }
-    assert len(stored) == 15 and all(r.traced for r in stored.values())
+    assert len(stored) == 5 and all(r.traced for r in stored.values())
 
     flughafen = stored[GEWERBEGEBIET_FLUGHAFEN]
     assert flughafen.publication_date == date(2026, 10, 12)
@@ -112,54 +95,56 @@ def test_full_pipeline_fixture_to_db(
         "detail_page_failed",
         "missing_publication_date",
     ]
-    nr_911 = stored["11196578"]
-    assert (nr_911.geocode_status, nr_911.srid) == ("unresolved", None)
 
 
 def test_full_pipeline_twice_is_idempotent(
     db_engine: Engine, mock_client: MockClient, harvester_config: HarvesterConfig
 ) -> None:
     client = mock_client(portal_routes(harvester_config))
-    run_all(db_engine, client, harvester_config)
+    source = dresden_finished(harvester_config)
+    run_source(db_engine, client, source, harvester_config)
     ids_before = query(db_engine, "SELECT id FROM iris_staging.signal_ingest ORDER BY id")
 
-    second = run_all(db_engine, client, harvester_config)
+    second = run_source(db_engine, client, source, harvester_config)
 
-    assert [(s.inserted, s.updated) for s in second] == [(0, 5), (0, 10)]
+    assert (second.inserted, second.updated) == (0, 5)
     assert query(db_engine, "SELECT id FROM iris_staging.signal_ingest ORDER BY id") == ids_before
-    # Every row now points at the second run of its source
-    latest = {s.run_id for s in second}
+    # Every row now points at the second run
     assert {
         r.ingest_run_id
         for r in query(db_engine, "SELECT ingest_run_id FROM iris_staging.signal_ingest")
-    } == latest
+    } == {second.run_id}
 
 
 def test_errors_visible_in_ingest_run(
     db_engine: Engine, mock_client: MockClient, harvester_config: HarvesterConfig
 ) -> None:
-    _, leipzig = sources(harvester_config)
-    # One good row, one plan already in force (the portal ignoring its own filter)
-    page = table(row("1"), row("2", status="rechtskräftig"))
-    client = mock_client({leipzig_stadtportal.listing_url(leipzig): page})
+    sachsen = dresden_finished(harvester_config)
+    # One good marker, one without a title
+    page = markers_page(
+        [marker(1), marker(2, title="  ")], '<span class="ui-paginator-current">1 - 2 von 2</span>'
+    )
+    client = mock_client(
+        {sachsen_portal.listing_url(sachsen, "dresden", "BEENDETE"): page, DETAIL.format(1): 404}
+    )
 
-    summary = run_source(db_engine, client, leipzig, harvester_config)
+    summary = run_source(db_engine, client, sachsen, harvester_config)
 
     [run] = query(db_engine, "SELECT status, records_rejected, errors FROM iris_staging.ingest_run")
     assert (summary.status, run.status, run.records_rejected) == ("completed", "completed", 1)
     assert summary.inserted == 1
     [error] = run.errors
-    assert error["kind"] == "unexpected_status"
-    assert "rechtskräftig" in error["snippet"]
+    assert error["kind"] == "missing_title"
+    assert '"id": 2' in error["snippet"]
 
 
 def test_unreachable_source_is_a_failed_run(
     db_engine: Engine, mock_client: MockClient, harvester_config: HarvesterConfig
 ) -> None:
-    _, leipzig = sources(harvester_config)
-    client = mock_client({leipzig_stadtportal.listing_url(leipzig): 503})
+    sachsen = dresden_finished(harvester_config)
+    client = mock_client({sachsen_portal.listing_url(sachsen, "dresden", "BEENDETE"): 503})
 
-    summary = run_source(db_engine, client, leipzig, harvester_config)
+    summary = run_source(db_engine, client, sachsen, harvester_config)
 
     [run] = query(db_engine, "SELECT status, error_message, errors FROM iris_staging.ingest_run")
     assert (summary.status, run.status) == ("failed", "failed")
@@ -179,11 +164,10 @@ def test_crash_rolls_back_records_and_fails_run(
         raise RuntimeError("database went away")
 
     monkeypatch.setattr("harvester.runner.upsert_records", upsert_then_crash)
-    _, leipzig = sources(harvester_config)
-    listing = load_fixture("leipzig_stadt_listing_im_verfahren.html")
-    client = mock_client({leipzig_stadtportal.listing_url(leipzig): listing})
+    sachsen = dresden_finished(harvester_config)
+    client = mock_client(portal_routes(harvester_config))
 
-    summary = run_source(db_engine, client, leipzig, harvester_config)
+    summary = run_source(db_engine, client, sachsen, harvester_config)
 
     assert summary.status == "failed"
     assert query(db_engine, "SELECT count(*) AS n FROM iris_staging.signal_ingest")[0].n == 0

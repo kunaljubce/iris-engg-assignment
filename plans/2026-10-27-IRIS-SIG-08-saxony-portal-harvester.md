@@ -2,8 +2,8 @@
 
 ## Overview
 
-Build a Python harvester that scrapes Bauleitplan (land-use zoning) procedures from two
-Saxony citizen participation portals, filters for industrial/commercial hearings, normalises
+Build a Python harvester that scrapes Bauleitplan (land-use zoning) procedures from the
+Saxon state citizen participation portal, filters for industrial/commercial hearings, normalises
 the data, and loads it into a PostGIS-backed `iris_staging.signal_ingest` table with
 idempotent upserts and full auditability.
 
@@ -28,10 +28,9 @@ This is a greenfield repository. No existing code, schema, or configuration file
 All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, provenance in
 `SOURCES.md`).
 
-1. **Two portals, both server-rendered, and everything needed is a plain GET.** Dresden and
-   Leipzig are on the Saxon state portal (`buergerbeteiligung.sachsen.de`, PrimeFaces);
-   Leipzig also has its own plan register (`www.leipzig.de`, TYPO3). No browser automation is
-   needed: `httpx` + BeautifulSoup.
+1. **One portal, server-rendered, and everything needed is a plain GET.** Dresden and
+   Leipzig are both on the Saxon state portal (`buergerbeteiligung.sachsen.de`, PrimeFaces).
+   No browser automation is needed: `httpx` + BeautifulSoup.
 
 2. **The state portal embeds per-procedure coordinates.** Each listing contains an
    OpenLayers call `map.drawMarkers([...])` whose JSON array has one entry per result, **across
@@ -39,48 +38,39 @@ All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, pr
    (WGS84), `adresse` (street address). All 83 markers captured have coordinates inside the city
    bounding boxes. Geometry comes from the source, not from a lookup table.
 
-3. **The Leipzig city portal has no coordinates and no dates.** Rows give status, one or more
-   districts and one or more Thema values; the detail page adds nothing else (plan PDFs only).
-   These rows are stored with `geocode_status = 'unresolved'` and no publication date.
-
-4. **EPSG zone mismatch.** Both cities are east of 12 deg E (Leipzig ~12.4, Dresden ~13.7), i.e.
+3. **EPSG zone mismatch.** Both cities are east of 12 deg E (Leipzig ~12.4, Dresden ~13.7), i.e.
    outside the nominal coverage of EPSG:25832 (UTM 32N, 6--12 deg E); their native zone is
    EPSG:25833. The brief mandates 25832, so points are transformed with PostGIS `ST_Transform`
    and the zone note goes in the README. The bounding-box check catches gross errors.
 
-5. **The state portal status filter is a GET parameter**: `&status=AKTUELLE` (the default view)
+4. **The status filter is a GET parameter**: `&status=AKTUELLE` (the default view)
    or `&status=BEENDETE` (finished). Uppercase only; lowercase is silently ignored. Cards render
    10 per page behind a PrimeFaces AJAX paginator ("1 - 10 von 52"), but the marker JSON already
    lists all 52, so the adapter reads the markers and never pages. The "von N" count, when
    present, is a completeness check against the marker count.
 
-6. **State-portal IDs come from one shared sequence across cities**, so `source_record_id` is
-   unique per portal. The detail URL must use the marker's `href`: a Dresden ID under
+5. **IDs come from one shared sequence across cities**, so `source_record_id` is
+   unique on the portal. The detail URL must use the marker's `href`: a Dresden ID under
    `/portal/leipzig/` silently redirects to the Leipzig listing (HTTP 200).
 
-7. **Publication date = start of the "Zeitraum".** There is no separate "published on" field.
+6. **Publication date = start of the "Zeitraum".** There is no separate "published on" field.
    The detail page's `li.nbp-statistik--laufzeit` ("Zeitraum 12.10.2026 bis 13.11.2026") is the
    period in which the draft is publicly "veröffentlicht" (the detail text says so: "vom ... bis
    ... veröffentlicht"; BauGB § 3 (2)). Its start date is the publication date.
 
-8. **Most Leipzig city-portal plans are not hearings.** The register lists ~555 plans; ~93 %
-   are "rechtskräftig" (in force, participation long finished). Only "im Verfahren" plans can
-   have a hearing. The status filter is a GET parameter, `tx_lepurpose[filter][89][]=252`, which
-   returns 39 rows on one page (10 industrial).
-
 ### Portal Details
 
-| Attribute | Saxon State Portal (Dresden + Leipzig) | Leipzig City Portal |
-|---|---|---|
-| Listing URL | `/portal/{city}/beteiligung/themen?format=Bauleitplan&status={AKTUELLE\|BEENDETE}` | `/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene?tx_lepurpose[filter][89][]=252` |
-| Framework | Jakarta Faces / PrimeFaces | TYPO3 + `tx_lepurpose` extension |
-| What is read | `map.drawMarkers([...])` JSON (all results, no paging) | `tr[id^="project-"]` table rows |
-| Pagination | Not needed (markers list every result) | "Load more" button `.start-ajax-pagination[data-next=N]`; GET `tx_lepurpose[filter][page]=N`, 50 rows/page |
-| Detail URL | marker `href`: `/portal/{city}/beteiligung/themen/{id}` | `.../bebauungsplaene/detail/projekt/{slug}` (not fetched) |
-| Stable ID | marker `id` (numeric) | `project-{id}` from the row |
-| Coordinates | marker `latitude` / `longitude` (WGS84) | none |
-| Publication date | detail page `li.nbp-statistik--laufzeit`, start date | none |
-| Items (2026-10-27) | Dresden 8 current + 52 finished; Leipzig 2 current + 21 finished | 39 im Verfahren (of ~555) |
+| Attribute | Saxon State Portal (Dresden + Leipzig) |
+|---|---|
+| Listing URL | `/portal/{city}/beteiligung/themen?format=Bauleitplan&status={AKTUELLE\|BEENDETE}` |
+| Framework | Jakarta Faces / PrimeFaces |
+| What is read | `map.drawMarkers([...])` JSON (all results, no paging) |
+| Pagination | Not needed (markers list every result) |
+| Detail URL | marker `href`: `/portal/{city}/beteiligung/themen/{id}` |
+| Stable ID | marker `id` (numeric) |
+| Coordinates | marker `latitude` / `longitude` (WGS84) |
+| Publication date | detail page `li.nbp-statistik--laufzeit`, start date |
+| Items (2026-10-27) | Dresden 8 current + 52 finished; Leipzig 2 current + 21 finished |
 
 ---
 
@@ -88,9 +78,9 @@ All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, pr
 
 - `docker compose up` starts PostgreSQL 16 / PostGIS 3.4.
 - `alembic upgrade head` creates `iris_staging` schema, `signal_ingest` + `ingest_run` tables, PostGIS extension.
-- `harvester run` scrapes both sources (state portal per city and status), filters, upserts, and records each run in `ingest_run`.
+- `harvester run` scrapes the state portal (per city and status), filters, upserts, and records each run in `ingest_run`.
 - `pytest` passes, including idempotent re-run and duplicate detection, with no network access.
-- `harvester report` prints the quality report from the database: the latest run per source with counts and errors, and the stored records by geocode status and quality flag.
+- `harvester report` prints the quality report from the database: the latest run with counts and errors, and the stored records by geocode status and quality flag.
 
 ### Verification
 
@@ -113,19 +103,14 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 
 ## What We Are NOT Doing
 
-- Merging duplicate rows across sources (overlap is documented, not resolved).
-- Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 5, 8).
-- Geocoding of any kind: no online service (Nominatim, Google) and no district-centroid table.
-  The state portal supplies coordinates; Leipzig city-portal rows give only districts (often
-  several), an area rather than a point, so they are stored `unresolved` with the reason. An
-  invented centroid point would be less honest than a documented NULL.
+- Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 4).
+- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply
+  coordinates; a marker without them is stored `unresolved` with the reason.
 - Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
-- Fetching Leipzig city-portal detail pages: they hold nothing the listing row lacks.
-- Matching keywords in descriptions. The filter reads titles (plus Thema on the city portal):
+- Matching keywords in descriptions. The filter reads titles:
   plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring
   uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for
   matches, for the publication date.
-- Storing "rechtskräftig" Leipzig city-portal plans: they are in force, not hearings.
 - Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
 - Downloading or parsing PDF plan documents.
 - Building a web UI or API layer.
@@ -138,7 +123,7 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
   copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the
   `db`-marked tests run every query against it.
 - Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent
-  re-runs, not fast ones, and a full live run is ~14 requests (under a minute).
+  re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
 - Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The
   brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees
   on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
@@ -146,21 +131,21 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
   (`records_filtered_out`). `--dry-run` prints every record with its filter decision for
   tuning the keyword list.
 - Columns the brief doesn't ask for (plan type, plan number, procedure step, status,
-  participation end date, Thema). They are kept as scraped in `raw_data`.
+  participation end date). They are kept as scraped in `raw_data`.
 - Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an
   index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
-- Deleting rows that vanish from a portal or stop matching the filter. They stay, with an
+- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an
   older `ingest_run_id` (validation check 9).
 
 ---
 
 ## Implementation Approach
 
-Two adapters (the state portal adapter runs once per city and status) behind a common
-`ScrapedRecord` model. Each fetches pages with one shared `httpx.Client` and parses them with
+One adapter, `sachsen_portal.py`, runs once per city and status and produces
+`ScrapedRecord`s. It fetches pages with one shared `httpx.Client` and parses them with
 BeautifulSoup. Parsing functions take an HTML string and return data, so tests feed them
 fixture files directly. A shared pipeline applies the industrial keyword filter, fetches the
-detail page of each state-portal match for its publication date, checks coordinates against
+detail page of each match for its publication date, checks coordinates against
 the city bounding box, and upserts into PostGIS, where `ST_Transform` produces the EPSG:25832
 point.
 
@@ -178,7 +163,7 @@ iris-engg-assignment/
       20_create_test_db.sql         # creates iris_test database + postgis extension
   .env.example                      # placeholders only (no secrets committed)
   config/
-    settings.yml                   # city/source list, keyword list, bounding boxes
+    settings.yml                   # source and cities, keyword list, bounding boxes
   migrations/
     env.py
     versions/
@@ -201,7 +186,6 @@ iris-engg-assignment/
         base.py                     # ScrapeResult, ScrapeError (no adapter class hierarchy)
         fetch.py                    # fetch(): httpx GET with retries, status checks, polite delay
         sachsen_portal.py           # state portal: marker JSON + detail page (Dresden + Leipzig)
-        leipzig_stadtportal.py      # city portal: table rows, "im Verfahren" only
       pipeline/
         __init__.py
         normalise.py                # ScrapedRecord -> NormalisedRecord, date parsing, quality flags
@@ -209,7 +193,7 @@ iris-engg-assignment/
         geocode.py                  # bounding-box check of source coordinates
   .github/
     workflows/
-      ci.yml                        # ruff, mypy, migrations, all tests on push to main
+      ci.yml                        # ruff, mypy, migrations, all tests on PRs and pushes to main
   sql/
     validation_queries.sql          # post-ingest verification
   tests/
@@ -220,9 +204,7 @@ iris-engg-assignment/
       SOURCES.md                    # provenance: source URL + capture date per fixture
       sachsen_dresden_listing_beendet.html     # marker JSON, "von 52"
       sachsen_dresden_detail.html              # "Zeitraum"
-      leipzig_stadt_listing_im_verfahren.html  # rows, districts, Thema
     test_sachsen_adapter.py
-    test_leipzig_adapter.py
     test_fetch.py                   # retry on 5xx/429/timeouts, no retry on 4xx
     test_normalise.py
     test_filter.py
@@ -233,7 +215,7 @@ iris-engg-assignment/
     test_cli.py                     # source/city selection, --dry-run without a database
     test_quality_report.py          # latest run, failed run + errors, empty database
   sample_output/
-    signal_ingest_sample.csv        # the 19 live records of 2026-10-28
+    signal_ingest_sample.csv        # the 9 live records of 2026-10-28
   plans/
     2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md  # this file
   README.md
@@ -256,14 +238,6 @@ sources:
     format_filter: "Bauleitplan"
     # One listing request per status; BEENDETE is needed for finished procedures
     status_filters: ["AKTUELLE", "BEENDETE"]
-
-  - name: leipzig_stadtportal
-    type: leipzig_stadt
-    base_url: "https://www.leipzig.de"
-    listing_path: "/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene"
-    # tx_lepurpose[filter][89][] value for "im Verfahren"; "rechtskräftig" (251) plans are
-    # in force, not hearings
-    status_filter_id: 252
 
 scraping:
   request_delay_seconds: 2.0
@@ -293,9 +267,6 @@ industrial_filter:
     - "GE"
     - "GI"
     - "GVZ"
-  # Leipzig city-portal Thema value, matched exactly (a row can have several)
-  thema_signals:
-    - "Gewerbe"
 
 bounding_boxes:
   # WGS84 [min_lon, min_lat, max_lon, max_lat]
@@ -324,7 +295,7 @@ Every column traces back to a line in the brief; anything else scraped stays in 
 
 Only industrial matches are stored: the objective says *filter*. Non-matching records are
 counted in `ingest_run.records_filtered_out`, not stored. Fields that are scraped but not
-required (status, raw "Zeitraum" text, Thema, source coordinates as given) live in `raw_data`
+required (status, raw "Zeitraum" text, source coordinates as given) live in `raw_data`
 only.
 
 No secondary indexes: at <1000 rows a sequential scan beats any index, and nothing queries
@@ -340,8 +311,8 @@ CREATE TABLE iris_staging.ingest_run (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     started_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at          TIMESTAMPTZ,
-    source               TEXT NOT NULL,         -- 'sachsen_portal' | 'leipzig_stadtportal'
-    city                 TEXT,                  -- 'dresden' | 'leipzig' | NULL (for multi-city runs)
+    source               TEXT NOT NULL,         -- 'sachsen_portal'
+    city                 TEXT,                  -- 'dresden' | 'leipzig' | NULL (run covers all cities)
     status               TEXT NOT NULL DEFAULT 'running'
                          CHECK (status IN ('running', 'completed', 'failed')),
     -- NOT NULL so the quality report's sums never meet a NULL
@@ -361,15 +332,14 @@ CREATE TABLE iris_staging.ingest_run (
 ```sql
 CREATE TABLE iris_staging.signal_ingest (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source           TEXT NOT NULL,             -- 'sachsen_portal' | 'leipzig_stadtportal'
-    source_record_id TEXT NOT NULL,             -- portal-specific ID (numeric or slug)
+    source           TEXT NOT NULL,             -- 'sachsen_portal'
+    source_record_id TEXT NOT NULL,             -- marker id
     ingest_run_id    UUID NOT NULL REFERENCES iris_staging.ingest_run(id),  -- run that last wrote the row
 
     city             TEXT NOT NULL,             -- 'dresden' | 'leipzig'
     title            TEXT NOT NULL,
     detail_url       TEXT NOT NULL,             -- traceability: every row links back to its source
-    location_text    TEXT,                      -- as the source gives it: street address (state
-                                                -- portal) or district(s) (city portal)
+    location_text    TEXT,                      -- street address as the source gives it
 
     publication_date DATE,                      -- start of the detail page's "Zeitraum"; NULL if none
 
@@ -380,7 +350,7 @@ CREATE TABLE iris_staging.signal_ingest (
     geocode_status   TEXT NOT NULL
                      CHECK (geocode_status IN
                             ('source_coordinates', 'unresolved', 'rejected_out_of_bounds')),
-    geocode_reason   TEXT,                      -- why unresolved/rejected, e.g. 'source gives district only'
+    geocode_reason   TEXT,                      -- why unresolved/rejected, e.g. 'marker has no coordinates'
 
     quality_flags    TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'missing_publication_date', 'missing_location',
                                                     -- 'unparseable_date', 'detail_page_failed'
@@ -409,8 +379,8 @@ worth a hash column and its tests (see "What We Are NOT Doing").
 **Step 0: de-duplicate the batch in Python.** Records are written one statement each, so a
 repeated key would not fail, but it would be written twice and counted as 1 inserted + 1
 updated for a single row, and the repeat (a source problem) would go unseen.
-Records with a repeated `(source, source_record_id)` in one batch (e.g. a card shown on two
-listing pages while the Leipzig register re-sorts) are collapsed to the last occurrence. Each one
+Records with a repeated `(source, source_record_id)` in one batch (e.g. a procedure that moves
+from `AKTUELLE` to `BEENDETE` between the two listing requests) are collapsed to the last occurrence. Each one
 dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
 
 **Step 1: insert or overwrite.**
@@ -461,7 +431,7 @@ transaction, collecting each `RETURNING` row. That's simple, keeps the per-recor
 obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one
 `executemany` call isn't something to rely on with `text()`.
 
-**Rows are never deleted.** A plan that disappears from a portal, or stops matching after the
+**Rows are never deleted.** A plan that disappears from the portal, or stops matching after the
 keyword list changes, keeps its row; its `ingest_run_id` then points at an older run than the
 latest one covering its city (validation check 9 lists these).
 
@@ -484,9 +454,6 @@ from dataclasses import dataclass, field
 
 from harvester.config import IndustrialFilterConfig
 
-# Marks a Leipzig Thema match in matched_keywords, e.g. "thema:Gewerbe"
-THEMA_PREFIX = "thema:"
-
 
 @dataclass(frozen=True)
 class FilterResult:
@@ -502,11 +469,9 @@ class IndustrialFilter:
             *((kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in config.keywords),
             *((tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in config.case_sensitive_tokens),
         ]
-        self._thema_signals = set(config.thema_signals)
 
-    def check(self, title: str, thema: list[str]) -> FilterResult:
-        # A Leipzig row can carry several Thema values ("Wohnen", "Gewerbe", ...)
-        keywords = [f"{THEMA_PREFIX}{t}" for t in thema if t in self._thema_signals]
+    def check(self, title: str) -> FilterResult:
+        keywords: list[str] = []
         evidence: list[str] = []
         for keyword, pattern in self._patterns:
             hits = pattern.findall(title)
@@ -525,11 +490,10 @@ class IndustrialFilter:
 `evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und
 Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
 
-Only the title (and the Leipzig Thema list) is read; see "What We Are NOT Doing" for why not
+Only the title is read; see "What We Are NOT Doing" for why not
 descriptions. The filter runs on listing data, **before** any detail page is fetched, so only
 matches cost an extra request. Only records with `is_industrial = True` are stored;
-`matched_keywords` is the stored evidence for why each row is there (a `thema:` prefix marks a
-Leipzig Thema match). Non-matches are counted in `ingest_run.records_filtered_out`, and
+`matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and
 `--dry-run` prints every record with its filter decision, so false negatives can be checked
 while tuning the keyword list.
 
@@ -537,14 +501,12 @@ while tuning the keyword list.
 
 ## Coordinates and Bounding Box
 
-Only the state portal supplies coordinates (marker `latitude` / `longitude`, WGS84). The
-pipeline sets `geocode_status` per record:
+The markers supply the coordinates (`latitude` / `longitude`, WGS84). The pipeline sets `geocode_status` per record:
 
 | Case | `geocode_status` | `geometry` | `geocode_reason` |
 |---|---|---|---|
 | Marker coordinates parse as finite numbers and lie inside the city's bounding box | `source_coordinates` | EPSG:25832 point | NULL |
 | Marker coordinates missing or blank (either one) | `unresolved` | NULL | `marker has no coordinates` |
-| Leipzig city-portal row | `unresolved` | NULL | `source gives district only: <districts>` |
 | Coordinates non-numeric, non-finite or outside the box (e.g. lat/lon swapped) | `rejected_out_of_bounds` | NULL | e.g. `lon 51.05 outside dresden [13.55, 13.95]`, `lon 'abc' is not a number` |
 
 **Bounding box rejection:** coordinates are checked in WGS84 against the per-city box from
@@ -558,14 +520,14 @@ stored geometries in SQL.
 upsert. That keeps pyproj out of the dependencies; the database tests check a control point.
 
 **Note on EPSG:25832:** both cities are east of UTM zone 32N's nominal 12 deg E edge (Key
-Discovery 4). The CRS is still usable there, but scale distortion grows; documented in the
+Discovery 3). The CRS is still usable there, but scale distortion grows; documented in the
 README.
 
 ---
 
 ## Adapter Details
 
-Both adapters use one shared `httpx.Client` (user agent and timeout from config) and go
+The adapter uses one shared `httpx.Client` (user agent and timeout from config) and go
 through `fetch()` for every request (see **Resilience**). Parsing is split into pure functions
 (`str` in, data out) so the tests can call them on fixture text directly.
 
@@ -580,7 +542,7 @@ Runs once per city in `cities` and status in `status_filters`:
    - `id` -> `source_record_id` (as a string)
    - `kategorie` -> `title` (`html.unescape`, since the portal escapes quotes as `&quot;`)
    - `href` -> `detail_url` (joined to the listing URL; the city in the path matters, Key
-     Discovery 6). Missing `href`: built from the listing's city and the `id`
+     Discovery 5). Missing `href`: built from the listing's city and the `id`
    - `latitude` / `longitude` -> kept as given; checked in the pipeline
    - `adresse` -> `location_text`
    - `raw_data` = `{"marker": <entry as given>, "listing_url": <page URL>}`
@@ -603,38 +565,15 @@ JSON is an error (`markers_not_found`), not an empty result: it means the page c
 **Malformed markers:** an entry without `id` or `kategorie` becomes a `ScrapeError` (counted
 in `records_rejected`); the others are still parsed.
 
-### Leipzig City Portal Adapter (`leipzig_stadtportal.py`)
-
-1. GET `{base_url}{listing_path}?tx_lepurpose[filter][89][]={status_filter_id}` (only "im
-   Verfahren"; Key Discovery 8).
-2. `parse_rows(html, page_url)` for each `tr[id^="project-"]`:
-   - `source_record_id`: from the `tr` id (`project-1751` -> `1751`)
-   - title and `detail_url`: `a.filterlist-detailpage` (text of its `span:not(.icon)`, i.e.
-     without the trailing `arrow_forward` icon text, and href)
-   - cells **by column position**, as in the table header (image, Titel, Status, Stadtbezirk/
-     Ortsteil, Thema); each cell's `ul > li` texts. A row can have several districts
-     ("Nord / Eutritzsch") and several Thema values, or none. Fewer cells than that ->
-     `unexpected_row_layout` error
-   - status must be exactly `["im Verfahren"]`, else `unexpected_status` error and the row is
-     not stored: if the portal ever ignored the filter parameter, plans in force would
-     otherwise be stored as hearings
-   - `location_text`: the districts joined with `"; "`
-   - `raw_data` = `{"status", "districts", "thema", "listing_url"}`
-3. `parse_next_page(html)`: `data-next` of `.start-ajax-pagination`, or None. While there is
-   one, GET the same URL plus `tx_lepurpose[filter][page]=N`; only forward (N greater than the
-   current page), so a bad button can't loop. Today the filtered list fits on one page; the loop is tested with a snippet page carrying the real button markup.
-4. No detail pages: they hold nothing the row lacks (Key Discovery 3). Every row is
-   `unresolved` with no publication date.
-
-### Common: ScrapedRecord Model
+### ScrapedRecord Model
 
 ```python
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 class ScrapedRecord(BaseModel):
-    source: str                     # 'sachsen_portal' | 'leipzig_stadtportal'
+    source: str                     # 'sachsen_portal'
     source_record_id: str           # stable ID from the source
     city: str                       # 'dresden' | 'leipzig'
     title: str
@@ -643,7 +582,6 @@ class ScrapedRecord(BaseModel):
     lon: float | str | None = None  # as given by the source; checked in the pipeline
     lat: float | str | None = None
     zeitraum: str | None = None     # raw "Zeitraum ..." text from the detail page
-    thema: list[str] = Field(default_factory=list)  # filter input only (Leipzig); stored in raw_data
     raw_data: dict[str, Any]        # all scraped fields as-is
 ```
 
@@ -659,7 +597,7 @@ class ScrapedRecord(BaseModel):
 
   Any other `4xx` is not retried. It is recorded as a page-level error (e.g. a detail page
   that 404s gets `quality_flags = ['detail_page_failed']` and keeps its listing data).
-- **Redirects:** followed. A detail URL that ends up on a listing page (Key Discovery 6) is
+- **Redirects:** followed. A detail URL that ends up on a listing page (Key Discovery 5) is
   caught because that page's `<body>` lacks the record's `nbp-beteiligung-{id}` class, so
   `parse_detail` returns None and the row is flagged `missing_publication_date`.
 - **Polite delay:** `request_delay_seconds` (default 2s) before every request.
@@ -667,27 +605,26 @@ class ScrapedRecord(BaseModel):
   via the `HARVESTER_USER_AGENT` env var so an operator can add a contact address without
   committing it to source.
 - **Timeout:** `timeout_seconds` (default 30s) per request.
-- **Empty response handling:** An adapter that receives zero results returns an empty list
-  and logs a warning. It does not raise an exception. The `ingest_run` row records the count.
-- **Malformed records:** Adapters return a `ScrapeResult(records, errors)`, not a bare list.
+- **Empty response handling:** A listing with zero results gives an empty list and a
+  logged warning. It does not raise an exception. The `ingest_run` row records the count.
+- **Malformed records:** The adapter returns a `ScrapeResult(records, errors)`, not a bare list.
   The handling depends on how bad the record is:
   - **Unusable** (no stable ID or no title): becomes a `ScrapeError` with the raw snippet
-    (marker JSON entry or row HTML) and the page URL. It is written to `ingest_run.errors`
+    (the marker JSON entry) and the page URL. It is written to `ingest_run.errors`
     and counted in `records_rejected`.
   - **Usable but incomplete** (e.g. unparseable date, missing location, bad coordinates):
     stored, with the problem recorded in `quality_flags` / `geocode_status`.
 
   Nothing is silently dropped. The quality report surfaces both kinds.
-- **Graceful degradation:** If one adapter fails entirely (e.g., portal is down), the
-  other adapters still run. The failed adapter's `ingest_run` records `status = 'failed'`.
-  "Fails entirely" means an exception anywhere in the run, or no records at all plus at least
+- **Failed runs:** If the run fails entirely (e.g. the portal is down), its `ingest_run`
+  records `status = 'failed'` and the CLI exits 1. "Fails entirely" means an exception anywhere in the run, or no records at all plus at least
   one error. Some pages failing while others work is a `completed` run with those errors.
 
 ---
 
 ## Publication Dates
 
-The brief requires dates to be verified, not assumed. What was verified (Key Discovery 7):
+The brief requires dates to be verified, not assumed. What was verified (Key Discovery 6):
 
 - The state portal has no separate "published on" field. The detail page's "Zeitraum A bis B"
   is the period in which the plan is publicly "veröffentlicht" (BauGB § 3 (2)), stated in the
@@ -695,28 +632,10 @@ The brief requires dates to be verified, not assumed. What was verified (Key Dis
 - It is taken from the detail page, never from the listing card (cards exist for only 10
   results per page) and never derived from the run time.
 - The raw "Zeitraum ..." text is kept in `raw_data`, so the derivation is traceable per row.
-- The Leipzig city portal publishes no dates: `publication_date` stays NULL and
-  `quality_flags` gets `missing_publication_date`. Same for a state-portal detail page without
-  a "Zeitraum".
+- A detail page without a "Zeitraum" (or one that fails to load) leaves `publication_date`
+  NULL, and `quality_flags` gets `missing_publication_date`.
 - Dates that are present but unparseable get `unparseable_date`, with the raw text in
   `raw_data`.
-
----
-
-## Source Overlap Documentation
-
-The same Leipzig Bauleitplan may appear on both the Saxon state portal and the Leipzig city
-portal, e.g. Nr. 911 "Industriegebiet am Flughafen Leipzig-Halle, 1. Änderung" (state portal,
-finished; city portal, im Verfahren). These are stored as **separate rows** with different
-`source` values: each portal's record is a signal in its own right, with its own URL.
-
-Potential matching strategy (not implemented, documented for future work):
-- Match on city + plan number from the title ("Nr. 911", "Nummer 320"); validation check 10
-  lists these pairs.
-- A future `iris_staging.signal_match` table could link `source_record_id` pairs.
-
-The `source` column and `UNIQUE (source, source_record_id)` constraint ensure no
-accidental merging.
 
 ---
 
@@ -923,10 +842,9 @@ it as `***`, and the engine is built with `hide_parameters=True`.
   `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`. Covered by
   `tests/test_config.py`.
 - **Changed after the Phase 2 captures:** `scraping.headless` and `page_timeout_ms` removed
-  (Playwright-only), `timeout_seconds: float` added; `LeipzigStadtSource.status_filter_id: int`
-  added (252 = "im Verfahren").
-- `rows_per_page` is not in the config: page sizes are a property of the portals, and both
-  adapters page until no results are left.
+  (Playwright-only), `timeout_seconds: float` added.
+- `rows_per_page` is not in the config: the page size is a property of the portal, and the
+  marker JSON lists every result anyway.
 
 ### Choices You May Be Asked About
 
@@ -998,7 +916,7 @@ it as `***`, and the engine is built with `hide_parameters=True`.
 
 ### Overview
 
-Implement `fetch()` and the two adapters (httpx + BeautifulSoup), producing `ScrapedRecord`
+Implement `fetch()` and the state portal adapter (httpx + BeautifulSoup), producing `ScrapedRecord`
 instances. Test with saved HTML fixtures (no live network).
 
 ### Changes Required
@@ -1007,10 +925,10 @@ instances. Test with saved HTML fixtures (no live network).
 
 - `pyproject.toml`: `uv remove playwright pyproj && uv add httpx` (see Phase 1 step 1).
 - `config/settings.yml` + `config.py`: drop `headless` / `page_timeout_ms`, add
-  `timeout_seconds` and `status_filter_id` (see Phase 1 step 5); adjust `tests/test_config.py`.
+  `timeout_seconds` (see Phase 1 step 5); adjust `tests/test_config.py`.
 - Migration `001` (not applied anywhere but local dev databases): `geocode_status` values
   `source_coordinates` / `unresolved` / `rejected_out_of_bounds`, `ck_geometry_matches_status`
-  on `source_coordinates`, `district` -> `location_text`, `date_source` dropped. Re-apply with
+  on `source_coordinates`, a `location_text` column, `date_source` dropped. Re-apply with
   `alembic downgrade base && alembic upgrade head`.
 - README: remove the `playwright install chromium` step.
 
@@ -1031,9 +949,9 @@ from harvester.models import ScrapedRecord
 class ScrapeError:
     url: str
     kind: str              # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
-                           # | 'unexpected_row_layout' | 'unexpected_status' | 'http_4xx' | 'retries_exhausted'
+                           # | 'http_4xx' | 'retries_exhausted'
     message: str
-    snippet: str | None = None  # marker JSON entry or row HTML, truncated to 2 KB
+    snippet: str | None = None  # marker JSON entry, truncated to 2 KB
 
 
 @dataclass
@@ -1042,20 +960,14 @@ class ScrapeResult:
     errors: list[ScrapeError] = field(default_factory=list)
 ```
 
-**No adapter base class.** Each adapter is a module with a function of the same signature,
-`scrape(client, source, settings) -> ScrapeResult`. The CLI picks it by the source's `type`
-from `settings.yml`:
-
-```python
-SCRAPERS = {"sachsen": sachsen_portal.scrape, "leipzig_stadt": leipzig_stadtportal.scrape}
-result = SCRAPERS[source.type](client, source, config.scraping)
-```
+**No adapter base class.** The adapter is a module with one entry point,
+`scrape(client, source, settings) -> ScrapeResult`, which the runner calls directly.
 
 #### 3. `src/harvester/adapters/fetch.py` ✅
 
 `fetch(client, url, settings) -> str` with the retry and status rules from **Resilience**. It
 raises `FetchError(kind, url, status, message)` when retries run out or on a non-retryable
-4xx; adapters turn that into a `ScrapeError`.
+4xx; the adapter turns that into a `ScrapeError`.
 
 - `max_retries: 3` = 3 retries **after** the first attempt (at most 4 requests).
 - Waits: `request_delay_seconds` before the first attempt; `retry_backoff_factor ** n` before
@@ -1078,47 +990,34 @@ raises `FetchError(kind, url, status, message)` when retries run out or on a non
 - `fetch_detail(client, record, settings) -> ScrapedRecord`: used by the pipeline for matches
   only. It lets `FetchError` through; the pipeline turns it into `detail_page_failed`.
 
-#### 5. `src/harvester/adapters/leipzig_stadtportal.py` ✅
-
-- `scrape(client, source: LeipzigStadtSource, settings) -> ScrapeResult`: follows the next-page
-  button until there is none.
-- `listing_url(source, page=1) -> str`
-- `parse_rows(html, page_url) -> tuple[list[ScrapedRecord], list[ScrapeError]]`
-- `parse_next_page(html) -> int | None`
-- A page that fails to fetch ends the loop with a `ScrapeError`; records already read are kept.
-
-#### 6. Test fixtures ✅
+#### 5. Test fixtures ✅
 
 **One real page per markup the code parses**; every edge case is a minimal HTML snippet
 inside its test, so the test shows exactly what is wrong with the input. Captured 2026-10-27,
 **once, by hand** with `curl` (harvester user agent, 2 s apart), kept whole; provenance in
 `tests/fixtures/SOURCES.md`, which covers "source access ... must be verified". It also lists
-the pages checked but not kept (other cities and statuses use the same markup; the city
-portal's detail page isn't parsed). The tests' reproducibility comes from the committed files,
+the pages checked but not kept (other cities and statuses use the same markup). The tests' reproducibility comes from the committed files,
 not from how they were downloaded.
 
 - `sachsen_dresden_listing_beendet.html`: 52 markers (5 industrial, titles with `&quot;`),
   10 cards, "von 52"
 - `sachsen_dresden_detail.html`: "Zeitraum 12.10.2026 bis 13.11.2026"
-- `leipzig_stadt_listing_im_verfahren.html`: 39 rows (10 industrial, several with multiple
-  districts / Thema values), no next-page button
 
 Inline snippets: empty listing, cards without marker JSON, marker without `id`, swapped / empty
-/ non-numeric coordinates, "von 52" against 51 markers, the next-page button (copied from
-the live markup in `SOURCES.md`), and HTTP errors via `MockTransport`.
+/ non-numeric coordinates, "von 52" against 51 markers, and HTTP errors via `MockTransport`.
 
-#### 7. `tests/conftest.py` ✅ (DB fixtures follow in Phase 4)
+#### 6. `tests/conftest.py` ✅ (DB fixtures follow in Phase 4)
 
 - `tests/__init__.py` makes `tests` a package, so test modules import `load_fixture` and
   `MockClient` from `tests.conftest` and mypy sees one module, not two
 - `load_fixture(name) -> str`
 - `mock_client(routes: dict[str, str | int])`: `make_client()` with an `httpx.MockTransport`
   that serves fixture text (or a status code) per URL and **fails the test on any unrouted
-  URL**, so tests can never reach the live portals. No extra dependency (MockTransport is part
+  URL**, so tests can never reach the live portal. No extra dependency (MockTransport is part
   of httpx).
 - `scraping_config` fixture: no polite delay and no retries, so adapter tests run instantly.
 
-#### 8. `tests/test_sachsen_adapter.py` ✅
+#### 7. `tests/test_sachsen_adapter.py` ✅
 
 ```python
 def test_parses_markers():
@@ -1159,34 +1058,7 @@ def test_fetch_detail_adds_zeitraum(): ...
 def test_fetch_detail_failure_raises(): ...
 ```
 
-#### 9. `tests/test_leipzig_adapter.py` ✅
-
-```python
-def test_parses_rows():
-    """39 rows; ID, title without icon text, detail_url, status; no coordinates or date."""
-
-def test_splits_districts_and_thema():
-    """Nr. 485: 'West / Schönau; Alt-West / ...' -> location_text; 3 Thema values."""
-
-def test_row_without_thema_has_empty_list(): ...
-
-def test_unexpected_status_is_an_error():
-    """Snippet: a 'rechtskräftig' row -> unexpected_status, not stored."""
-
-def test_handles_malformed_rows():
-    """Snippet: no title link -> missing_title; too few cells -> unexpected_row_layout."""
-
-def test_parse_next_page():
-    """Real button markup -> 2; the fixture (no button) -> None."""
-
-def test_follows_next_page():
-    """Snippet page 1 with data-next=2, then the fixture (no button) as page 2: both fetched, then stop."""
-
-def test_failed_page_is_an_error():
-    """503 -> retries_exhausted error, no records, no exception."""
-```
-
-#### 10. `tests/test_fetch.py` ✅
+#### 8. `tests/test_fetch.py` ✅
 
 ```python
 def test_retries_on_503_then_succeeds(): ...
@@ -1208,13 +1080,8 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
   listing page instead of failing; the marker's own link is always right.
 - **Why fetch detail pages only for filter matches?** Only the detail page has the
   "Zeitraum"; fetching it for non-matches would be wasted requests on a public portal.
-- **Why only "im Verfahren" on the Leipzig city portal?** "rechtskräftig" plans are already in
-  force, not hearings. In the unfiltered sample, all 22 industrial matches were rechtskräftig.
-- **Why are Leipzig city-portal rows `unresolved`?** The source gives only a district, and the
-  detail page has no coordinates or dates. A district centroid would be an invented point;
-  `geocode_reason` says why instead.
-- **Why only 3 fixture files?** One real page per markup the code parses. Edge cases (empty
-  listing, malformed marker, next-page button, count mismatch, HTTP errors) are small inline
+- **Why only 2 fixture files?** One real page per markup the code parses. Edge cases (empty
+  listing, malformed marker, count mismatch, HTTP errors) are small inline
   snippets in the tests. `tests/fixtures/SOURCES.md` records where each page came from and
   what the dropped pages showed.
 - **Why `Field(default_factory=list)` and not `= []`?** Pydantic copies `[]` defaults, so it
@@ -1235,10 +1102,9 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
   afterwards.
 - **Why is `ScrapeError.kind` a plain `str`?** No database CHECK constrains it, unlike
   `geocode_status`; the allowed values are listed in a comment.
-- **Why no `BaseAdapter` class?** Two fixed sources, both set by the brief. An abstract base
-  pays off when implementations are swapped or added often; here it would only enforce one
-  method name. Two module functions with the same signature, picked from a dict by the
-  source's `type`, do the same with less code. (An ABC is in "Nice to Have" for a third source.)
+- **Why no `BaseAdapter` class?** There is one source, the one the brief names. An abstract
+  base pays off when implementations are swapped or added; here it would only wrap one
+  function. The runner calls `sachsen_portal.scrape()` directly.
 - **Why does `scrape()` take the `httpx.Client` as a parameter?** So tests can pass a client
   backed by `MockTransport`. The adapter never creates its own client.
 - **Why read the marker JSON with `raw_decode` instead of a regex?** A regex like
@@ -1255,32 +1121,21 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
   the portal has no results, which is normal. Cards without markers means the page layout
   changed and the adapter would silently return nothing.
 - **Why keep coordinates as given and check them later?** The adapter only reads; deciding
-  what is valid (bounding box, NaN) is one rule in the pipeline for every source. Values of the
+  what is valid (bounding box, NaN) is one rule in the pipeline. Values of the
   wrong JSON type (null, list) count as missing, with the original kept in `raw_data`.
 - **Why does `fetch_detail` let `FetchError` through?** A failed detail page isn't a scrape
   error: the record is still usable. The pipeline keeps it and adds `detail_page_failed`.
 - **Why `source = "sachsen_portal"` as a module constant, not from the config `name`?** It is
   the identifier stored in the database's natural key; it must not change if someone renames
   the config entry.
-- **Why read the Leipzig cells by column position, not by content?** The table header fixes
-  the order (Titel, Status, Stadtbezirk/ Ortsteil, Thema). Guessing "contains ` / ` means
-  district" would misfile any Thema value that ever contains " / ". Too few cells is an error.
-- **Why check each Leipzig row's status when the URL already filters on it?** The state portal
-  silently ignores a lowercase status; if the city portal ever ignored its filter, ~500 plans
-  already in force would be stored as hearings. A row that isn't "im Verfahren" becomes an
-  `unexpected_status` error: visible, not stored.
-- **Why no Leipzig detail pages?** Checked on 2026-10-27: they show only district, Thema,
-  status and plan PDFs, nothing the row lacks. Fetching them would be ~40 requests for nothing.
-- **Why does the page loop only move forward?** A next-page button pointing to the same or an
-  earlier page would otherwise loop forever against a public portal.
 - **Why `tests/__init__.py`?** It lets test modules import helpers from `tests.conftest`
   without mypy seeing the file under two module names.
-- **Why return errors instead of raising?** One bad marker or row must not stop the run; bad
+- **Why return errors instead of raising?** One bad marker must not stop the run; bad
   entries are collected next to the good ones ("errors are visible").
 - **Why `SNIPPET_MAX_CHARS = 2048`?** Enough to see what was wrong with an entry without
-  bloating `ingest_run.errors`; one constant instead of each adapter repeating 2048.
-- **Why one `fetch()` function for both portals?** Both need the same retry, 429 and delay
-  rules; written once, tested once (`tests/test_fetch.py`).
+  bloating `ingest_run.errors`; one named constant instead of a bare 2048.
+- **Why one `fetch()` function for every request?** Listings and detail pages need the same
+  retry, 429 and delay rules; written once, tested once (`tests/test_fetch.py`).
 - **Why no retry library (tenacity) or httpx's `retries=`?** httpx's built-in retries cover
   connection failures only, not 5xx or 429. tenacity would be a dependency to replace a short
   loop that can be explained line by line.
@@ -1288,7 +1143,7 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
   own. Any other 4xx (404, 403) won't, so it fails at once and is recorded.
 - **What does `max_retries: 3` mean?** 3 retries after the first try, so at most 4 requests per
   URL, waiting 2, 4, 8 s between them: about 14 s worst case per URL.
-- **Why honour only the seconds form of `Retry-After`?** Neither portal has sent a 429 at all;
+- **Why honour only the seconds form of `Retry-After`?** The portal has never sent a 429;
   parsing the date form would be code for a case never seen. It falls back to the backoff.
 - **Why does a retry wait only the backoff, not backoff plus polite delay?** The backoff is
   already at least as long; adding both makes the waits harder to reason about and test.
@@ -1303,18 +1158,18 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 ### Success Criteria
 
 #### Automated Verification
-- [x] `pytest tests/test_sachsen_adapter.py tests/test_leipzig_adapter.py tests/test_fetch.py` -- all pass
+- [x] `pytest tests/test_sachsen_adapter.py tests/test_fetch.py` -- all pass
 - [x] `ruff check src/harvester/adapters/` passes
 - [x] `mypy src/harvester/adapters/ src/harvester/models.py` passes
 
 #### Manual Verification
-- [x] Fixture HTML files are whole, unedited captures of the live portals (2026-10-27)
+- [x] Fixture HTML files are whole, unedited captures of the live portal (2026-10-27)
 - [x] `tests/fixtures/SOURCES.md` lists every fixture and the pages checked but not kept
-- [x] Status-filter mechanism, publication-date element and ID scope confirmed (Key Discoveries 5-8)
+- [x] Status-filter mechanism, publication-date element and ID scope confirmed (Key Discoveries 4-6)
 - [x] `ScrapedRecord` fields match expectations for each fixture (checked by hand against the pages, 2026-10-28)
-- [x] Live smoke run of both `scrape()` functions (2026-10-28): state portal 83 records
-      (Dresden 60, Leipzig 23), city portal 39, no errors; a live Leipzig state-portal
-      detail page gave its Zeitraum (body-class check holds for Leipzig too)
+- [x] Live smoke run of `scrape()` (2026-10-28): 83 records (Dresden 60, Leipzig 23), no
+      errors; a live Leipzig detail page gave its Zeitraum (body-class check holds for
+      Leipzig too)
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 3.
 
@@ -1325,7 +1180,7 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 ### Overview
 
 Turn `ScrapedRecord`s into `NormalisedRecord`s: filter (dropping non-matches), fetch the
-state-portal detail page of each match, parse the date, check the coordinates.
+detail page of each match, parse the date, check the coordinates.
 
 ### Changes Required
 
@@ -1339,14 +1194,12 @@ takes the validated config section directly.
 - `check_coordinates(lon, lat, city, bbox) -> GeocodeResult` (a NamedTuple of `lon, lat,
   status, reason`) following the table in **Coordinates and Bounding Box**. Pure Python; the
   transform happens in the upsert SQL.
-- It only judges coordinates. The Leipzig "district only" reason is set in `normalise`, which
-  knows the source gives no coordinates at all.
 
 #### 3. `src/harvester/pipeline/normalise.py` ✅
 
 - `normalise(scraped, client, config) -> NormaliseResult(records, filtered_out)`. It takes the
   HTTP client because only matches get their detail page fetched.
-- Order per record: filter -> (state portal, match) `fetch_detail` -> parse date -> check
+- Order per record: filter -> (match only) `fetch_detail` -> parse date -> check
   coordinates -> `NormalisedRecord`. Non-matches are dropped and counted as
   `records_filtered_out`.
 - Publication date: the first `DD.MM.YYYY` in the "Zeitraum" text to `datetime.date`,
@@ -1355,9 +1208,7 @@ takes the validated config section directly.
   `detail_page_failed`. A failed detail page also gets `missing_publication_date` (the date is
   missing; the other flag says why). `missing_location` means neither a point nor a
   `location_text`.
-- Leipzig city-portal rows: `unresolved` with `source gives district only: <districts>` (or
-  `source gives no location` if the row has none), set here rather than in `geocode.py`.
-- `raw_data` gains `filter_evidence`, and for state-portal matches `zeitraum` (raw text) and,
+- `raw_data` gains `filter_evidence`, `zeitraum` (raw text) and,
   if the detail page failed, `detail_error`.
 
 #### 4. Tests
@@ -1370,7 +1221,6 @@ def test_evidence_contains_full_compound_word():
 def test_matches_GE_case_sensitive():
 def test_no_false_positive_on_lowercase_ge():  # "gegen" should not match
 def test_short_codes_not_matched_inside_words():  # "GIESSEN", "GEMEINDE" -> no match
-def test_matches_thema_gewerbe_among_several():  # ["Wohnen", "Gewerbe"] -> thema:Gewerbe
 def test_no_match_returns_false():
 def test_keywords_from_config():
 
@@ -1384,8 +1234,7 @@ def test_rejects_non_numeric_and_non_finite():  # "abc", "13,76", NaN, inf
 # tests/test_normalise.py
 def test_publication_date_is_zeitraum_start():
 def test_unparseable_date_flagged_not_raised():
-def test_leipzig_row_unresolved_without_date():  # missing_publication_date, reason lists districts
-def test_leipzig_row_without_district_is_missing_location():
+def test_marker_without_coordinates_or_address_is_unresolved():  # missing_location
 def test_detail_fetched_only_for_matches():      # mock client sees no request for non-matches
 def test_detail_page_404_flagged():               # detail_page_failed, listing data kept
 def test_out_of_bounds_marker_is_rejected():      # swapped lat/lon end to end
@@ -1398,11 +1247,7 @@ Decided in this plan; confirm or update each one as the step is built.
 
 - **Why does the filter run before the detail page is fetched?** Only matches cost a second
   request: on the Dresden fixture 5 of 52 records, instead of all 52. (Step 1, built)
-- **Why a Thema match as well as the title?** Leipzig titles often name only a street ("Weheweg");
-  the city's own "Gewerbe" tag catches those. It also lets in mixed areas (Nr. 456
-  Alfred-Kunze-Sportpark); the `thema:` prefix in `matched_keywords` shows which rows came in
-  that way, so they can be reviewed. (Step 1, built)
-- **What does the filter miss?** Plans whose title and Thema say nothing industrial (Nr. 422
+- **What does the filter miss?** Plans whose title says nothing industrial (Nr. 422
   Radefelder Allee West). Reading descriptions would catch them but adds false positives; see
   "What We Are NOT Doing". (Step 1, checked on the fixtures)
 - **Why do some rows list both "Gewerbegebiet" and "Gewerbe"?** Long keywords match inside words,
@@ -1413,9 +1258,7 @@ Decided in this plan; confirm or update each one as the step is built.
 - **Why is a failed detail page a flag, not an error that drops the record?** The listing data
   (title, URL, point) is still valid; dropping the record would hide a real hearing. The flag
   and `raw_data.detail_error` make the gap visible. (Step 3, built)
-- **Why no date for Leipzig city-portal rows?** The source publishes none; inventing one (e.g.
-  the run date) would break "verified rather than assumed". (Step 3, built)
-- **Why match on the title (and Leipzig Thema) only, not descriptions?** Descriptions mention
+- **Why match on the title only, not descriptions?** Descriptions mention
   neighbouring commercial areas and produce false positives.
 - **Why substring matching for long keywords but whole tokens for GE/GI/GVZ?** German compounds
   ("Gewerbestandort") need substring hits; short codes as substrings would hit ordinary words
@@ -1427,9 +1270,9 @@ Decided in this plan; confirm or update each one as the step is built.
 - **Why not fix swapped lat/lon automatically?** Guessing would store a point nobody can vouch
   for; the brief says invalid coordinates must not be silently accepted. The raw values stay
   in `raw_data`. (Step 2, built)
-- **Why no geocoding of addresses or Leipzig districts?** The brief asks for points "where the
-  source provides sufficient information". A district is an area, and an external geocoder
-  adds a dependency and its own errors; see "What We Are NOT Doing". (Step 2)
+- **Why no geocoding of addresses?** The brief asks for points "where the source provides
+  sufficient information", and the markers carry coordinates. An external geocoder adds a
+  dependency and its own errors; see "What We Are NOT Doing". (Step 2)
 - **Why check the bounding box in Python, before the database?** A bad point is never written;
   the row is stored with `geometry = NULL`, `rejected_out_of_bounds` and the reason.
 - **Why is the check written as "inside" (`min <= v <= max`)?** NaN fails every comparison, so
@@ -1446,10 +1289,9 @@ Decided in this plan; confirm or update each one as the step is built.
 
 #### Manual Verification
 - [x] Filter decisions on the fixtures look right (no obvious misses or false hits). Checked
-  with a script, since `--dry-run` arrives in Phase 4: Dresden 5 of 52, Leipzig 10 of 39
-- [x] Live run of scrape + normalise (2026-10-28): state portal 83 scraped, 9 kept (7 Dresden,
-  2 Leipzig), all with a detail-page date and `source_coordinates`, no flags; city portal 39
-  scraped, 10 kept, all `unresolved` + `missing_publication_date`; no errors
+  with a script, since `--dry-run` arrives in Phase 4: Dresden 5 of 52
+- [x] Live run of scrape + normalise (2026-10-28): 83 scraped, 9 kept (7 Dresden, 2 Leipzig),
+  all with a detail-page date and `source_coordinates`, no flags, no errors
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 4.
 
@@ -1459,7 +1301,7 @@ Decided in this plan; confirm or update each one as the step is built.
 
 ### Overview
 
-Wire adapters to pipeline to database. Implement the CLI entry point, upsert logic,
+Wire the adapter to the pipeline and the database. Implement the CLI entry point, upsert logic,
 and integration tests including idempotent re-run and duplicate detection.
 
 ### Changes Required
@@ -1493,10 +1335,10 @@ and integration tests including idempotent re-run and duplicate detection.
   3. In one transaction: upsert, then write the run's counts, errors and final status.
   4. On any exception that transaction rolls back and the run is marked `failed` with
      `error_message`.
-- One `ingest_run` per source per invocation. `city` is set when the run covers one city
-  (city portal, or `--city`), NULL when the state portal covers both.
-- `records_rejected` counts the record-level errors (`missing_id`, `missing_title`,
-  `unexpected_row_layout`, `unexpected_status`); page-level ones are only in `errors`.
+- One `ingest_run` per invocation. `city` is set when the run covers one city (`--city`),
+  NULL when it covers both.
+- `records_rejected` counts the record-level errors (`missing_id`, `missing_title`);
+  page-level ones are only in `errors`.
 
 #### 4. `src/harvester/cli.py` (+ `__main__.py`) ✅
 
@@ -1504,7 +1346,7 @@ and integration tests including idempotent re-run and duplicate detection.
   An unknown source or city is a usage error, not an empty run.
 - `--dry-run` prints every scraped record (KEEP with keywords, date, geocode, flags, or `-`)
   and the scrape errors; it needs no database.
-- A normal run prints one summary line per source and exits 1 if any run failed.
+- A normal run prints one summary line and exits 1 if the run failed.
 - `harvester report` came with the report itself in Phase 5.
 
 #### 5. Tests ✅
@@ -1523,10 +1365,10 @@ def test_out_of_bounds_stored_with_null_geometry():
 def test_in_bounds_stored_with_geometry():      # SRID 25832
 def test_transform_control_point():             # Frauenkirche, pyproj value, 1 m tolerance
 
-# tests/test_pipeline_integration.py  (db, mocked portals)
-def test_full_pipeline_fixture_to_db():         # 52 -> 5 and 39 -> 10, dates, flags, traced runs
-def test_full_pipeline_twice_is_idempotent():   # (0, 5) and (0, 10); same ids
-def test_errors_visible_in_ingest_run():        # unexpected_status in errors, records_rejected
+# tests/test_pipeline_integration.py  (db, mocked portal)
+def test_full_pipeline_fixture_to_db():         # 52 -> 5, dates, flags, traced run
+def test_full_pipeline_twice_is_idempotent():   # (0, 5); same ids
+def test_errors_visible_in_ingest_run():        # missing_title in errors, records_rejected
 def test_unreachable_source_is_a_failed_run():  # 503 -> failed, error_message
 def test_crash_rolls_back_records_and_fails_run():
 
@@ -1540,28 +1382,32 @@ def test_dry_run_prints_decisions_without_database():
 
 Decided in this plan; confirm or update each one as the step is built.
 
-- **What does CI check, and when?** `.github/workflows/ci.yml` runs on every push to main:
+- **What does CI check, and when?** `.github/workflows/ci.yml` runs on every pull request to
+  main and every push to main:
   ruff, mypy, the migrations (up, down, up) and the whole pytest suite, including the db tests
   against a `postgis/postgis:16-3.4` service container. The README badge shows the latest
   result on main (green "passing" / red "failing"). (Built before Phase 4)
 - **Why trust auth in CI rather than a password secret?** The database is a throwaway container
   on the runner, so there is no credential to store or leak; `POSTGRES_PASSWORD` is set only
   because `DatabaseSettings` requires a value. (Built before Phase 4)
-- **What does one `ingest_run` row cover?** One source in one invocation. The state portal's
-  scrape reads both cities in one go, so `city` is NULL there; the report breaks rows down by
+- **What does one `ingest_run` row cover?** One invocation. The scrape reads both cities in
+  one go, so `city` is NULL unless `--city` narrows it; the report breaks rows down by
   city from `signal_ingest`. (Step 3, built)
 - **Why is the run row committed before the scrape?** So a run that crashes or hangs is still
   on record (`running` / `failed`), not lost with a rolled-back transaction. (Step 3, built)
 - **Why do the records and the run's `completed` status commit together?** A run is either
   fully written with its counts, or not at all and marked `failed`; never half-written. A test
   crashes after the upsert and checks no rows remain. (Step 3, built)
-- **What happens when one portal is down?** Its run is `failed` with the error, the other
-  source still runs, and the CLI exits 1 so a scheduler notices. (Step 3, built)
+- **What happens when the portal is down?** The run is `failed` with the error, and the CLI
+  exits 1 so a scheduler notices. (Step 3, built)
 - **Why a separate `runner.py` instead of logic in the CLI?** The integration tests call the
   same `run_source` the CLI calls, without click; the CLI only parses options and prints.
   (Step 3, built)
 - **Why do the db tests truncate instead of rolling back?** `run_source` commits twice on
   purpose (see above), which an outer test transaction can't contain. (Step 1, built)
+- **Why a `source` column with a single source?** It is half of the natural key the brief
+  asks for ("preserve source identifiers"), and it makes every row say where it came from.
+  `test_same_id_from_two_sources_is_two_rows` checks the key is the pair, not the ID alone.
 - **How is the run idempotent?** `UNIQUE (source, source_record_id)` plus `ON CONFLICT DO
   UPDATE`; a re-run can't add rows.
 - **Why no change detection (hash column)?** Nothing in the brief consumes "what changed"; an
@@ -1581,16 +1427,15 @@ Decided in this plan; confirm or update each one as the step is built.
 
 #### Automated Verification
 - [x] `pytest tests/test_upsert.py tests/test_bounding_box.py tests/test_pipeline_integration.py` -- all pass
-- [x] `python -m harvester run --dry-run` executes without error (mocked portals, `test_cli.py`)
+- [x] `python -m harvester run --dry-run` executes without error (mocked portal, `test_cli.py`)
 - [x] `ruff check .` passes
 - [x] `mypy .` passes
 
 #### Manual Verification (live, 2026-10-28)
-- [x] `python -m harvester run` against live portals populates the DB: state portal 83 scraped,
-  9 inserted (7 Dresden, 2 Leipzig, all with point and date); city portal 39 scraped, 10
-  inserted (all `unresolved`, no date)
-- [x] `SELECT count(*), source FROM iris_staging.signal_ingest GROUP BY source` shows 9 + 10
-- [x] Re-run produces 0 inserts (9 + 10 updated) and the same row count
+- [x] `python -m harvester run` against the live portal populates the DB: 83 scraped, 9
+  inserted (7 Dresden, 2 Leipzig, all with point and date)
+- [x] `SELECT count(*) FROM iris_staging.signal_ingest` shows 9
+- [x] Re-run produces 0 inserts (9 updated) and the same row count
 - [x] No `count_mismatch` errors (0 errors in both runs)
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 5.
@@ -1633,27 +1478,24 @@ Live output on 2026-10-28:
 IRIS-SIG-08 quality report
 
 Latest runs
-  source               city     status     started (UTC)     scraped  industrial  rejected  inserted  updated  errors
-  leipzig_stadtportal  leipzig  completed  2026-10-28 07:47       39          10         0        10        0       0
-  sachsen_portal       all      completed  2026-10-28 07:46       83           9         0         9        0       0
+  source          city  status     started (UTC)     scraped  industrial  rejected  inserted  updated  errors
+  sachsen_portal  all   completed  2026-10-28 09:44       83           9         0         9        0       0
 
 Run errors
   none
 
 Stored records
-  source               city     records  with point  unresolved  rejected bbox
-  leipzig_stadtportal  leipzig       10           0          10              0
-  sachsen_portal       dresden        7           7           0              0
-  sachsen_portal       leipzig        2           2           0              0
+  source          city     records  with point  unresolved  rejected bbox
+  sachsen_portal  dresden        7           7           0              0
+  sachsen_portal  leipzig        2           2           0              0
 
 Quality flags
-  source               city     flag                      records
-  leipzig_stadtportal  leipzig  missing_publication_date       10
+  none
 ```
 
 Built differently from the first draft of this plan:
 - One block per **source**, not per run and city ("sachsen_portal (dresden)"): since
-  Phase 4 a run covers a whole source, so the per-city view comes from `signal_ingest`.
+  Phase 4 a run covers all cities, so the per-city view comes from `signal_ingest`.
 - No "8 AKTUELLE + 52 BEENDETE" split of the scraped count: it isn't stored, and adding a
   column only for the report isn't worth it.
 - `report.py` next to `runner.py` instead of a `reporting/` package holding one module.
@@ -1664,7 +1506,7 @@ Built differently from the first draft of this plan:
 
 #### 2. `sql/validation_queries.sql` ✅
 
-10 checks, each headed by an `\echo` so the output of
+9 checks, each headed by an `\echo` so the output of
 `docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql` is
 readable. Checks marked "expect 0 rows" are violations when they return anything.
 
@@ -1679,10 +1521,8 @@ readable. Checks marked "expect 0 rows" are violations when they return anything
 | 7 | Points in EPSG:25832 and back in WGS84 | valid staging records |
 | 8 | Each record with its run, source URL and filter evidence | traceable records; filtering |
 | 9 | Stale records: not written by the latest completed run covering their city | traceable records |
-| 10 | The same plan on both portals (city + plan number) | documents the source overlap |
 
-Live results on 2026-10-28: the "expect 0" checks return 0 rows; check 10 finds Leipzig
-Nr. 911 on both portals. Check 6 was also tested by moving one point to Berlin inside a
+Live results on 2026-10-28: the "expect 0" checks return 0 rows. Check 6 was also tested by moving one point to Berlin inside a
 rolled-back transaction: it returned that row.
 
 Built differently from the first draft of this plan:
@@ -1701,7 +1541,7 @@ Built differently from the first draft of this plan:
 
 #### 3. `sample_output/signal_ingest_sample.csv` ✅
 
-All 19 records from the live run on 2026-10-28, every column of `signal_ingest`. The
+All 9 records from the live run on 2026-10-28, every column of `signal_ingest`. The
 geometry is written as `x_25832` / `y_25832` (as stored) and `lon` / `lat` (WGS84), and
 `raw_data` as JSON, so the sample also shows traceability and the filter evidence.
 
@@ -1709,8 +1549,7 @@ Made with one `COPY (SELECT …) TO STDOUT WITH (FORMAT csv, HEADER)` through
 `docker compose exec`; the README has the command to regenerate it.
 
 "Anonymized or public-source": the data is public-source. `raw_data` keeps only what the
-portals publish (marker, Zeitraum, Thema, districts, status, listing URL, filter
-evidence); a search for e-mail, phone and contact patterns found nothing to anonymize.
+portal publishes (marker, Zeitraum, listing URL, filter evidence); a search for e-mail, phone and contact patterns found nothing to anonymize.
 
 Built differently from the first draft of this plan:
 - No GeoJSON: the brief asks for sample output, and a second format of the same rows
@@ -1725,17 +1564,17 @@ how to run, and known limitations" or to an acceptance criterion:
 | Section | Serves |
 |---|---|
 | Intro + "How it works" (one table: step, code, what it does) | maintainable |
-| Data sources: both portals, access, selection, pagination, counts, why the second source | data source; "access verified rather than assumed" |
-| Mapping assumptions: column-by-source table, filter, Zeitraum date, coordinates, flags | mapping assumptions |
+| Data source: the state portal, access, selection, pagination, counts | data source; "access verified rather than assumed" |
+| Mapping assumptions: column table, filter, Zeitraum date, coordinates, flags, finished hearings | mapping assumptions |
 | Setup, Run the harvester, Quality report, validation checks, Sample output | how to run; demonstrable |
 | Configuration: `settings.yml`, `.env`, adding a city | configurable |
 | Tests: fixtures, retries, the db tests incl. re-run / duplicates, CI | automated tests incl. re-run/duplicate behaviour |
 | Known limitations | known limitations |
 
-Known limitations listed: title-only filter (Nr. 422 Radefelder Allee West), Thema
-"Gewerbe" on mixed-use plans (7 of 10 register rows match on Thema only), register rows
-without date or point, the same plan on both portals (Nr. 911), EPSG:25832 outside its
-zone, dependence on the portals' markup, rows never deleted.
+Known limitations listed: only the two cities, the portal lists only what a city publishes
+there (no open industrial Leipzig hearing on 2026-10-28), title-only filter (Nr. 422
+Radefelder Allee West), EPSG:25832 outside its zone, dependence on the portal's markup
+(`markers_not_found`, `count_mismatch`), rows never deleted.
 
 Built differently from the first draft of this plan:
 - No separate "Quick start", "Architecture overview" or "Adding new cities" sections:
@@ -1761,19 +1600,9 @@ made in one test transaction would otherwise have the same time.
 
 Decided in this plan; confirm or update each one as the step is built.
 
-- **Why are the two portals' copies of the same plan separate rows?** Each is a signal with its
-  own URL and source ID; merging them is future work. Validation check 10 lists the pairs by
-  city and plan number (e.g. Nr. 911).
 - **Why EPSG:25832 although both cities lie east of 12° E?** The brief requires it; it's usable
   there with growing scale distortion, documented in the README.
-- **Why keep the Thema-only Leipzig matches although some are mixed-use?** The city itself
-  tags them "Gewerbe", and dropping them would need a judgement per plan. They are marked
-  `thema:Gewerbe` in `matched_keywords` and listed as a known limitation, so a consumer can
-  filter them out.
-- **Why no district centroids for the Leipzig register rows?** A district is several km²;
-  its centroid would be a made-up location. `unresolved` with the district as
-  `location_text` is honest, and the brief asks to document unresolved locations.
-- **Why does the report show the latest run per source, but all stored records?** The run
+- **Why does the report show the latest run, but all stored records?** The run
   block answers "did the last harvest work?"; the records block answers "what does
   `signal_ingest` hold?", which is what a consumer reads. Rows from older runs (e.g. a plan
   that has since left the portal) are still in the table, so they belong in that count.
@@ -1800,19 +1629,21 @@ Decided in this plan; confirm or update each one as the step is built.
   live run, which the fixture tests can't see; anyone can run them with `psql`.
 - **Why does the stale-rows query match the run's city?** A `--city dresden` run doesn't
   touch Leipzig rows; without the city condition they would all look stale.
-- **Why keep finished (`BEENDETE`) state-portal hearings but not "rechtskräftig" register
-  plans?** A state-portal entry is a hearing record with its own Zeitraum, open or over; a
-  register plan in force is not a hearing record. Live 2026-10-28, 7 of the 9 state-portal
-  rows are finished hearings. Open vs finished shows in `raw_data` (listing URL status,
+- **Why keep finished (`BEENDETE`) hearings?** Each portal entry is a hearing record with
+  its own Zeitraum, open or over. Live 2026-10-28, 7 of the 9 rows are finished hearings. Open vs finished shows in `raw_data` (listing URL status,
   Zeitraum end).
 - **Why read "around Dresden and Leipzig" as the two cities?** The brief names the state
   portal, whose Dresden and Leipzig listings are the cities' own. Surrounding
   municipalities are a `cities` entry each (README limitation), not a code change.
+- **Why does the live data have no flags or unresolved rows?** On 2026-10-28 all 9 records
+  had coordinates in the box and a Zeitraum. The flagged, unresolved, rejected and failed
+  cases are shown by the tests (marker without coordinates, out-of-bounds marker, detail
+  page 404, unreachable portal), including the quality report's.
 
 ### Success Criteria
 
 #### Automated Verification
-- [x] `pytest` -- full suite passes (91 tests)
+- [x] `pytest` -- full suite passes (81 tests)
 - [x] `ruff check .` passes
 - [x] `mypy .` passes
 - [x] `python -m harvester report` generates report without error (live, 2026-10-28)
@@ -1821,160 +1652,10 @@ Decided in this plan; confirm or update each one as the step is built.
 - [ ] README instructions produce a working setup from scratch
 - [x] `sql/validation_queries.sql` runs against populated DB and returns sensible results
   (live, 2026-10-28)
-- [x] Sample CSV parses with every row and column (19 rows, 2026-10-28)
+- [x] Sample CSV parses with every row and column (9 rows, 2026-10-28)
 - [ ] Quality report identifies any data issues
 
 **Checkpoint:** Final review.
-
----
-
-## Phase 6: Drop the Leipzig City Register
-
-### Overview
-
-The brief names one source, `buergerbeteiligung.sachsen.de`; the Leipzig register was
-added for coverage, not because the brief asked for it. Dropping it leaves the schema,
-the migration and the pipeline shape unchanged and removes an adapter, the Thema filter
-path and the district-only geocode branch. Result (live 2026-10-28): 9 records, Dresden 7
-and Leipzig 2, all with a point and a publication date.
-
-What is given up, and the answer to have ready:
-- **The only pagination code.** The state portal pages its cards, but the marker JSON
-  lists every result; the "von N" count is checked against it (`count_mismatch`), so a
-  missing page would show as an error.
-- **Live unresolved rows.** Every stored row has a point; the unresolved, rejected and
-  missing-date paths are shown by the tests (marker without coordinates, out-of-bounds
-  marker, detail page without a Zeitraum).
-
-### Working Rules
-
-- Branch `feature/drop-leipzig-register` from `main`, **after** the PR trigger in
-  `.github/workflows/ci.yml` is on `main`.
-- One commit per step below. Each step leaves `ruff`, `mypy` and `pytest` green, so the
-  branch can be stopped or bisected at any commit.
-- Open the PR early; the `tests` workflow runs on every push to it. Squash-merge only
-  after it is green and reviewed. Undo after merge = `git revert` of the one squash
-  commit, via its own PR.
-
-### Removal Checklist (in order)
-
-#### 1. Move the acceptance-criteria tests off the register (nothing removed yet)
-
-These tests use the register only as a convenient source; what they prove (errors
-visible, failed run, rollback) must survive. Point them at the state portal:
-- `tests/test_pipeline_integration.py`: `test_errors_visible_in_ingest_run`,
-  `test_unreachable_source_is_a_failed_run`, `test_crash_rolls_back_records_and_fails_run`
-  -> the state portal, narrowed to one city and one status (`model_copy`, as
-  `select_sources` does) so each test maps one listing URL:
-  - errors: a listing with one good marker and one without `kategorie` ->
-    `missing_title`, `records_rejected = 1` (replaces `unexpected_status`)
-  - failed run: a 503 on the listing
-  - crash: the BEENDETE fixture plus its detail pages (or 404s, which only flag the rows)
-- `tests/test_quality_report.py`: the failed-run test -> `source="sachsen_portal"`.
-- `tests/test_upsert.py`: `test_same_id_from_two_sources_is_two_rows` -> a placeholder
-  second source name; it tests the unique key, which stays `(source, source_record_id)`.
-
-Commit: `test: run failure-path tests against the state portal`
-
-#### 2. Remove the source end to end
-
-- `config/settings.yml`: the `leipzig_stadtportal` source.
-- `src/harvester/config.py`: `LeipzigStadtSource`; `sources` becomes
-  `list[SachsenSource]`.
-- `src/harvester/adapters/leipzig_stadtportal.py`: delete.
-- `src/harvester/adapters/base.py`: drop `unexpected_row_layout` / `unexpected_status`
-  from the error-kind comment.
-- `src/harvester/runner.py`: the `Source` union and the dispatch on source type.
-- `src/harvester/cli.py`: the `LeipzigStadtSource` branch in `select_sources`. Keep
-  `--source` and the `sources` list: changing the config shape is churn with no gain.
-- `src/harvester/pipeline/normalise.py`: the "source gives district only" branch.
-- `src/harvester/models.py`: the `source` comment.
-- Tests: delete `tests/test_leipzig_adapter.py`; the register cases in `test_config.py`,
-  `test_cli.py` (dry run -> state portal), `test_normalise.py` (the two `leipzig_row`
-  tests) and the register fixture mapping and expected row in
-  `test_pipeline_integration.py`.
-- Fixtures: delete `leipzig_stadt_listing_im_verfahren.html`; drop the register rows in
-  `tests/fixtures/SOURCES.md`.
-
-Commit: `refactor: drop the Leipzig city register source`
-
-#### 3. Remove the Thema filter path
-
-- `src/harvester/models.py`: `ScrapedRecord.thema`.
-- `src/harvester/pipeline/filter.py`: `THEMA_PREFIX`, `_thema_signals`, the `thema`
-  argument of `check()`; the caller in `normalise.py`.
-- `src/harvester/config.py` and `config/settings.yml`: `thema_signals`.
-- `tests/test_filter.py`: `test_matches_thema_gewerbe_among_several` and the fixture's
-  `thema_signals`.
-
-Commit: `refactor: filter on title keywords only`
-
-#### 4. Validation SQL
-
-- `sql/validation_queries.sql`: delete check 10 (cross-portal pairs); it is the last
-  check, so nothing is renumbered. Check 9's `--city dresden` comment still holds
-  (state-portal Leipzig rows).
-
-Commit: `refactor(sql): drop the cross-portal check`
-
-#### 5. Fresh live run and sample
-
-The local `iris` database holds the 10 register rows. Start from an empty one (the user
-runs `docker compose down -v`; everything in it is regenerable), then:
-`docker compose up -d`, `uv run alembic upgrade head`, `uv run harvester run`,
-`uv run harvester report`, the validation SQL, and the README's `COPY` command to
-regenerate `sample_output/signal_ingest_sample.csv` (9 rows). Run `harvester run` a
-second time for the re-run numbers (0 inserted, 9 updated).
-
-Commit: `chore: regenerate sample CSV from the state portal only`
-
-#### 6. README
-
-- Intro and "How it works": one portal.
-- "Data sources": one-column table; drop "Why the second source".
-- "Mapping assumptions": drop the register column, the `thema:Gewerbe` mention and the
-  "rechtskräftig" sentence in the finished-hearings bullet; the "each portal's copy"
-  bullet goes.
-- Quality report output, check table (checks 1-9) and re-run counts from step 5.
-- "Known limitations": drop the register (no date or point), Thema "Gewerbe" mixed use,
-  and Nr. 911 on both portals. Add: the state portal lists only the procedures a city
-  publishes there (Leipzig: 23, none open and industrial on 2026-10-28).
-- "Tests": the db test descriptions that mention the register.
-
-Commit: `docs: describe the state portal as the only source`
-
-#### 7. This plan
-
-- Key Discoveries 1, 3, 8, Portal Details, the Leipzig adapter section, Source Overlap,
-  and the Phase 2-5 choices that rest on the register: mark "dropped in Phase 6" rather
-  than delete, so the reasoning stays traceable.
-- Choices below: fill in as decided.
-
-Commit: `docs(plan): record dropping the Leipzig register`
-
-### Choices You May Be Asked About
-
-- **Why drop a source that works?** The brief names one source and asks to identify "the
-  relevant" source. The register added 10 rows without dates or points, 7 of them on
-  Thema only, and code that serves no acceptance criterion.
-- **Why port the failure tests instead of deleting them with the register?** They prove
-  acceptance criteria (errors visible, failed run, rollback), not register behaviour.
-- **Why keep `source` in the schema and the `sources` list in config?** No migration and
-  no config reshape; the unique key and per-source runs stay correct with one source.
-
-### Success Criteria
-
-#### Automated Verification
-- [ ] `tests` workflow green on the PR
-- [ ] `grep -rniE "leipzig_stadt|stadtportal|thema" src tests config sql` finds nothing
-
-#### Manual Verification
-- [ ] Live run: 9 records (Dresden 7, Leipzig 2), all with a point and a date
-- [ ] Re-run: 0 inserted, 9 updated, still 9 records
-- [ ] Validation checks 1-9 give the README's expected results
-- [ ] Sample CSV has 9 rows
-
-**Checkpoint:** PR reviewed and squash-merged.
 
 ---
 
@@ -1998,7 +1679,7 @@ Commit: `docs(plan): record dropping the Leipzig register`
 - **HTTP:** no browser. Parsing tests call the pure `parse_*` functions on fixture text;
   `scrape()` and pipeline tests use the `mock_client` from `conftest.py` (httpx
   `MockTransport`), which **fails on any URL not mapped to a fixture**, so tests can never reach
-  the live portals.
+  the live portal.
 - **Database:** the PostGIS `iris_test` database from `docker compose`, at
   `DatabaseSettings().test_url`. There is **no SQLite/SpatiaLite fallback**: the upsert depends on
   PostgreSQL-only features (`ON CONFLICT`, `xmax`, `ST_Transform`, `TEXT[]`), so a
@@ -2015,13 +1696,13 @@ Commit: `docs(plan): record dropping the Leipzig register`
 
 ## Performance Considerations
 
-- **Request volume (2026-10-27):** 4 state-portal listings + 1 city-portal listing + one
-  detail page per state-portal match (~9) = ~14 requests, under a minute at a 2 s delay. The
+- **Request volume (2026-10-27):** 4 listings (2 cities x 2 statuses) + one detail page
+  per match (~9) = ~13 requests, under a minute at a 2 s delay. The
   live run is quick enough to demo; re-run and idempotency demos also work against fixtures.
 - **Database:** Small table (<1000 rows, only industrial matches). No indexes beyond the
   primary key and `uq_source_record`; see **Database Schema**.
 - **Memory:** HTML pages are small (<700 KB each). No memory concerns.
-- **HTTP:** one `httpx.Client` reused across all adapters (connection reuse).
+- **HTTP:** one `httpx.Client` reused for every request (connection reuse).
 
 ---
 
@@ -2051,17 +1732,13 @@ Not required for acceptance. Pick up only once Phases 1-5 are done.
 - **Stricter config validation.** Parked because each check guards against an unlikely
   mistake rather than an acceptance criterion: `https://` pattern on `base_url`, value ranges
   (delay >= 0, `retry_backoff_factor` >= 1, timeout > 0, lat/lon within -90..90 / -180..180),
-  non-empty `sources` / `cities` / `status_filters`, and a discriminated union on the source
-  `type` for clearer error messages.
-- **Adapter base class (`BaseAdapter` ABC).** Worth it once a third source is added; with two
-  fixed sources, module functions with the same `scrape()` signature are enough.
+  and non-empty `sources` / `cities` / `status_filters`.
 
 ---
 
 ## References
 
 - Saxon state portal: `https://buergerbeteiligung.sachsen.de/portal/{city}/beteiligung/themen`
-- Leipzig city portal: `https://www.leipzig.de/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene`
 - BauGB (Federal Building Code): procedure phases SS 2-10
 - BauNVO (Building Use Ordinance): zone type definitions (GE, GI, SO, etc.)
 - EPSG:25832: ETRS89 / UTM zone 32N

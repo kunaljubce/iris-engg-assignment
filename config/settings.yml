@@ -11,14 +11,6 @@ sources:
     # One listing request per status; BEENDETE is needed for finished procedures
     status_filters: ["AKTUELLE", "BEENDETE"]
 
-  - name: leipzig_stadtportal
-    type: leipzig_stadt
-    base_url: "https://www.leipzig.de"
-    listing_path: "/rathaus/buergerbeteiligung/buergerbeteiligung-und-planinformation/bebauungsplaene"
-    # tx_lepurpose[filter][89][] value for "im Verfahren"; "rechtskräftig" (251) plans are
-    # in force, not hearings
-    status_filter_id: 252
-
 scraping:
   request_delay_seconds: 2.0
   max_retries: 3
@@ -47,9 +39,6 @@ industrial_filter:
     - "GE"
     - "GI"
     - "GVZ"
-  # Leipzig Thema field direct match
-  thema_signals:
-    - "Gewerbe"
 
 bounding_boxes:
   # WGS84 [min_lon, min_lat, max_lon, max_lat]

@@ -14,7 +14,7 @@ GeocodeStatus = Literal["source_coordinates", "unresolved", "rejected_out_of_bou
 
 
 class ScrapedRecord(BaseModel):
-    source: str  # 'sachsen_portal' | 'leipzig_stadtportal'
+    source: str  # 'sachsen_portal'
     source_record_id: str  # stable ID from the source
     city: str  # 'dresden' | 'leipzig'
     title: str
@@ -23,7 +23,6 @@ class ScrapedRecord(BaseModel):
     lon: float | str | None = None  # as given by the source; checked in the pipeline
     lat: float | str | None = None
     zeitraum: str | None = None  # raw "Zeitraum ..." text from the detail page
-    thema: list[str] = Field(default_factory=list)  # filter input only (Leipzig)
     raw_data: dict[str, Any]  # all scraped fields as-is
 
 

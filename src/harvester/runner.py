@@ -17,18 +17,16 @@ import httpx
 from psycopg.types.json import Jsonb
 from sqlalchemy import Connection, Engine, text
 
-from harvester.adapters import leipzig_stadtportal, sachsen_portal
+from harvester.adapters import sachsen_portal
 from harvester.adapters.base import ScrapeError, ScrapeResult
-from harvester.config import HarvesterConfig, LeipzigStadtSource, SachsenSource
+from harvester.config import HarvesterConfig, SachsenSource
 from harvester.db.upsert import upsert_records
 from harvester.pipeline.normalise import NormaliseResult, normalise
 
 logger = logging.getLogger(__name__)
 
-Source = SachsenSource | LeipzigStadtSource
-
 # Errors for one unusable record (counted as rejected), as opposed to page-level errors
-RECORD_ERROR_KINDS = {"missing_id", "missing_title", "unexpected_row_layout", "unexpected_status"}
+RECORD_ERROR_KINDS = {"missing_id", "missing_title"}
 
 
 @dataclass
@@ -46,18 +44,15 @@ class RunSummary:
 
 
 def scrape_and_normalise(
-    client: httpx.Client, source: Source, config: HarvesterConfig
+    client: httpx.Client, source: SachsenSource, config: HarvesterConfig
 ) -> tuple[ScrapeResult, NormaliseResult]:
     """The network half of a run, with no database; `--dry-run` uses it on its own."""
-    if isinstance(source, SachsenSource):
-        scraped = sachsen_portal.scrape(client, source, config.scraping)
-    else:
-        scraped = leipzig_stadtportal.scrape(client, source, config.scraping)
+    scraped = sachsen_portal.scrape(client, source, config.scraping)
     return scraped, normalise(scraped.records, client, config)
 
 
 def run_source(
-    engine: Engine, client: httpx.Client, source: Source, config: HarvesterConfig
+    engine: Engine, client: httpx.Client, source: SachsenSource, config: HarvesterConfig
 ) -> RunSummary:
     """Run one source end to end. Never raises: a failure is returned (and stored) as a
     'failed' run, so the next source still runs."""
@@ -94,7 +89,7 @@ def run_source(
     return summary
 
 
-def _start_run(conn: Connection, source: Source, config: HarvesterConfig) -> UUID:
+def _start_run(conn: Connection, source: SachsenSource, config: HarvesterConfig) -> UUID:
     # city stays NULL for the state portal: one run covers all its cities
     cities = source.city_slugs
     run_id: UUID = conn.execute(
