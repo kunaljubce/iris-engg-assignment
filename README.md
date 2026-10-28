@@ -78,7 +78,7 @@ timeouts, and send the user agent `IRIS-SIG-08-Harvester/1.0 (bot)`.
   `.python-version`) and all dependencies.
 - Docker with Docker Compose, for the local PostgreSQL 16 / PostGIS 3.4 database.
 
-### Steps
+### Steps (with verifications to test everything works)
 
 ```bash
 # 1. Install Python dependencies
@@ -96,26 +96,20 @@ docker compose ps
 
 # 4. Create the database schema
 uv run alembic upgrade head
-```
 
-### Verify the setup
-
-```bash
-# Lint, type checks and tests
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy .
+# 5. Verify - Tests pass
+uv run mypy . && \
 uv run pytest
 
-# PostGIS is installed in both databases (expect 3.4 ... twice)
+# 6. Verify - PostGIS is installed in both databases (expect 3.4 ... twice)
 docker compose exec db psql -U iris -d iris -c "SELECT PostGIS_Version();"
 docker compose exec db psql -U iris -d iris_test -c "SELECT PostGIS_Version();"
 
-# The schema exists: alembic_version, ingest_run and signal_ingest in iris_staging
+# 7. Verify - alembic_version, ingest_run and signal_ingest in iris_staging
 docker compose exec db psql -U iris -d iris -c "\dt iris_staging.*"
 uv run alembic current        # expect: 001 (head)
 
-# Migrations reverse cleanly
+# 8. Verify - Migrations reverse cleanly
 uv run alembic downgrade base
 uv run alembic upgrade head
 ```
@@ -257,9 +251,6 @@ Notes:
 
 - **Run all commands from the repository root.** The harvester and Alembic read `.env` from the current directory.
 - **`.env` is gitignored and must never be committed.** `docker compose up` refuses to start if `POSTGRES_PASSWORD` is not set.
-- **Set the password once.** Docker Compose and the harvester read the same `POSTGRES_*` variables. The harvester builds the connection URL from them, so the password can contain any characters and doesn't need URL-encoding.
-- **Database init scripts run only once, on an empty data volume.** After editing `docker/initdb/20_create_test_db.sql`, or `POSTGRES_USER`, `POSTGRES_PASSWORD` or `POSTGRES_DB` in `.env`, reset the database (`docker compose down -v`) for the change to take effect.
-- **Apple Silicon:** the official `postgis/postgis` image is amd64-only, so Docker runs it under emulation (`platform: linux/amd64` in `docker-compose.yml`). It's slower to start but fine for this dataset.
 - **Everything the harvester creates is in the `iris_staging` schema,** including Alembic's version table (`iris_staging.alembic_version`). Migrations never drop the schema or the PostGIS extension.
 
 ## Configuration
@@ -277,8 +268,7 @@ box under `bounding_boxes`; no code changes. Each run stores the config it used 
 
 ## Tests
 
-`uv run pytest` runs all tests. The scrapers are tested against real pages saved on
-2026-10-27 (`tests/fixtures/`, provenance in `SOURCES.md`) through httpx's mock
+`uv run pytest` runs all tests. The scrapers are tested against real pages through httpx's mock
 transport, so no test touches the network. Edge cases (empty listing, malformed markers,
 HTTP errors, count mismatch) are small HTML snippets inside the tests. `test_fetch.py` covers
 the retries: 5xx, 429 with `Retry-After` and timeouts are retried, 404 is not.
