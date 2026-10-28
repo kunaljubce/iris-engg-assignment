@@ -211,7 +211,6 @@ iris-engg-assignment/
       ci.yml                        # ruff, mypy, migrations, all tests on push to main
   sql/
     validation_queries.sql          # post-ingest verification
-    export_samples.sql              # writes sample_output/ CSV + GeoJSON via psql
   tests/
     __init__.py
     conftest.py                     # fixture loader, httpx MockTransport, DB fixtures
@@ -233,8 +232,7 @@ iris-engg-assignment/
     test_cli.py                     # source/city selection, --dry-run without a database
     test_quality_report.py          # latest run, failed run + errors, empty database
   sample_output/
-    signal_ingest_sample.csv
-    signal_ingest_sample.geojson
+    signal_ingest_sample.csv        # the 19 live records of 2026-10-28
   plans/
     2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md  # this file
   README.md
@@ -1700,17 +1698,23 @@ Built differently from the first draft of this plan:
 - The README's inline queries moved here; the README lists the checks with the expected
   live results.
 
-#### 3. `sample_output/signal_ingest_sample.csv` and `sample_output/signal_ingest_sample.geojson`
+#### 3. `sample_output/signal_ingest_sample.csv` ✅
 
-Generated from a real run against the portals. CSV with all columns. GeoJSON with the rows
-that have a geometry, for visual inspection.
+All 19 records from the live run on 2026-10-28, every column of `signal_ingest`. The
+geometry is written as `x_25832` / `y_25832` (as stored) and `lon` / `lat` (WGS84), and
+`raw_data` as JSON, so the sample also shows traceability and the filter evidence.
 
-Written by `sql/export_samples.sql` with `psql`: `\copy (SELECT …) TO … CSV HEADER` for
-the CSV, and one query building the FeatureCollection with `json_build_object` /
-`json_agg` and `ST_AsGeoJSON(ST_Transform(geometry, 4326))` (GeoJSON is WGS84 by spec).
-No Python export command: nothing more to maintain, and anyone can repeat it with `psql`.
-The README's database checks move into `validation_queries.sql`, and the README points
-to the file.
+Made with one `COPY (SELECT …) TO STDOUT WITH (FORMAT csv, HEADER)` through
+`docker compose exec`; the README has the command to regenerate it.
+
+"Anonymized or public-source": the data is public-source. `raw_data` keeps only what the
+portals publish (marker, Zeitraum, Thema, districts, status, listing URL, filter
+evidence); a search for e-mail, phone and contact patterns found nothing to anonymize.
+
+Built differently from the first draft of this plan:
+- No GeoJSON: the brief asks for sample output, and a second format of the same rows
+  isn't needed; the points are in the CSV as coordinates.
+- No `sql/export_samples.sql`: one `COPY` command in the README does the same.
 
 #### 4. `README.md`
 
@@ -1768,8 +1772,9 @@ Decided in this plan; confirm or update each one as the step is built.
   `ingest_run.errors`.
 - **Why read from the database instead of the run's in-memory summary?** The report then
   works at any time, after any run or a crash, and checks what was actually committed.
-- **Why export samples with SQL rather than a Python command?** It's two queries, needs no
-  new code to test or defend, and is repeatable by anyone with `psql`.
+- **Why only a CSV sample, made by one `COPY` command?** The brief asks for sample output;
+  one file with every column (points as coordinates) covers it. A GeoJSON copy or an
+  export command would be extra code and files with nothing new to show.
 - **Why does the bounding-box check read the boxes from `config_snapshot`?** It checks
   each point against the config the run actually used. A hardcoded box in SQL would be a
   second copy of `settings.yml` that can drift, and a changed box would wrongly flag
@@ -1793,7 +1798,7 @@ Decided in this plan; confirm or update each one as the step is built.
 - [ ] README instructions produce a working setup from scratch
 - [x] `sql/validation_queries.sql` runs against populated DB and returns sensible results
   (live, 2026-10-28)
-- [ ] Sample CSV and GeoJSON open correctly in QGIS / geojson.io
+- [x] Sample CSV parses with every row and column (19 rows, 2026-10-28)
 - [ ] Quality report identifies any data issues
 
 **Checkpoint:** Final review.

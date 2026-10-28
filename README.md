@@ -161,6 +161,28 @@ record count should stay at 19.
 
 To run a single query, open a SQL shell with `docker compose exec db psql -U iris -d iris`.
 
+### Sample output
+
+`sample_output/signal_ingest_sample.csv` holds all 19 records from the live run on
+2026-10-28, with every column of `signal_ingest`. The geometry is given as `x_25832` /
+`y_25832` (EPSG:25832, as stored) and `lon` / `lat` (WGS84). It's public-source data:
+`raw_data` keeps only what the portals publish (marker, Zeitraum, Thema, districts,
+status), with no personal details, so nothing needed anonymizing.
+
+To regenerate it from your database:
+
+```bash
+docker compose exec -T db psql -U iris -d iris -c "COPY (
+  SELECT id, source, source_record_id, ingest_run_id, city, title, detail_url, location_text,
+         publication_date, matched_keywords, geocode_status, geocode_reason,
+         round(ST_X(geometry)::numeric, 2) AS x_25832, round(ST_Y(geometry)::numeric, 2) AS y_25832,
+         round(ST_X(ST_Transform(geometry, 4326))::numeric, 6) AS lon,
+         round(ST_Y(ST_Transform(geometry, 4326))::numeric, 6) AS lat,
+         quality_flags, raw_data, created_at, updated_at
+  FROM iris_staging.signal_ingest ORDER BY source, city, source_record_id
+) TO STDOUT WITH (FORMAT csv, HEADER)" > sample_output/signal_ingest_sample.csv
+```
+
 ### Stop or reset the database
 
 ```bash
