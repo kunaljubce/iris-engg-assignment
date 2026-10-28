@@ -1313,7 +1313,7 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 
 ---
 
-## Phase 3: Pipeline (Filter, Detail Dates, Geocode, Normalise)
+## Phase 3: Pipeline (Filter, Detail Dates, Geocode, Normalise) ✅
 
 ### Overview
 
@@ -1335,15 +1335,23 @@ takes the validated config section directly.
 - It only judges coordinates. The Leipzig "district only" reason is set in `normalise`, which
   knows the source gives no coordinates at all.
 
-#### 3. `src/harvester/pipeline/normalise.py`
+#### 3. `src/harvester/pipeline/normalise.py` ✅
 
+- `normalise(scraped, client, config) -> NormaliseResult(records, filtered_out)`. It takes the
+  HTTP client because only matches get their detail page fetched.
 - Order per record: filter -> (state portal, match) `fetch_detail` -> parse date -> check
   coordinates -> `NormalisedRecord`. Non-matches are dropped and counted as
   `records_filtered_out`.
 - Publication date: the first `DD.MM.YYYY` in the "Zeitraum" text to `datetime.date`,
   following **Publication Dates**. Unparseable text becomes NULL plus `unparseable_date`.
 - Quality flags: `missing_publication_date`, `missing_location`, `unparseable_date`,
-  `detail_page_failed`.
+  `detail_page_failed`. A failed detail page also gets `missing_publication_date` (the date is
+  missing; the other flag says why). `missing_location` means neither a point nor a
+  `location_text`.
+- Leipzig city-portal rows: `unresolved` with `source gives district only: <districts>` (or
+  `source gives no location` if the row has none), set here rather than in `geocode.py`.
+- `raw_data` gains `filter_evidence`, and for state-portal matches `zeitraum` (raw text) and,
+  if the detail page failed, `detail_error`.
 
 #### 4. Tests
 
@@ -1370,8 +1378,10 @@ def test_rejects_non_numeric_and_non_finite():  # "abc", "13,76", NaN, inf
 def test_publication_date_is_zeitraum_start():
 def test_unparseable_date_flagged_not_raised():
 def test_leipzig_row_unresolved_without_date():  # missing_publication_date, reason lists districts
+def test_leipzig_row_without_district_is_missing_location():
 def test_detail_fetched_only_for_matches():      # mock client sees no request for non-matches
 def test_detail_page_404_flagged():               # detail_page_failed, listing data kept
+def test_out_of_bounds_marker_is_rejected():      # swapped lat/lon end to end
 def test_non_industrial_records_dropped_and_counted():
 ```
 
@@ -1391,6 +1401,13 @@ Decided in this plan; confirm or update each one as the step is built.
 - **Why do some rows list both "Gewerbegebiet" and "Gewerbe"?** Long keywords match inside words,
   so the general one hits too. Which rows are stored only depends on whether anything matched.
   (Step 1, built)
+- **Why does `normalise` take the HTTP client?** The detail page is the only source of the
+  date, and it's fetched for matches only (9 requests live instead of 83). (Step 3, built)
+- **Why is a failed detail page a flag, not an error that drops the record?** The listing data
+  (title, URL, point) is still valid; dropping the record would hide a real hearing. The flag
+  and `raw_data.detail_error` make the gap visible. (Step 3, built)
+- **Why no date for Leipzig city-portal rows?** The source publishes none; inventing one (e.g.
+  the run date) would break "verified rather than assumed". (Step 3, built)
 - **Why match on the title (and Leipzig Thema) only, not descriptions?** Descriptions mention
   neighbouring commercial areas and produce false positives.
 - **Why substring matching for long keywords but whole tokens for GE/GI/GVZ?** German compounds
@@ -1416,12 +1433,16 @@ Decided in this plan; confirm or update each one as the step is built.
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `pytest tests/test_normalise.py tests/test_filter.py tests/test_geocode.py` -- all pass
-- [ ] `ruff check src/harvester/pipeline/` passes
-- [ ] `mypy src/harvester/pipeline/` passes
+- [x] `pytest tests/test_normalise.py tests/test_filter.py tests/test_geocode.py` -- all pass
+- [x] `ruff check src/harvester/pipeline/` passes
+- [x] `mypy src/harvester/pipeline/` passes
 
 #### Manual Verification
-- [ ] `--dry-run` filter decisions on the fixtures look right (no obvious misses or false hits)
+- [x] Filter decisions on the fixtures look right (no obvious misses or false hits). Checked
+  with a script, since `--dry-run` arrives in Phase 4: Dresden 5 of 52, Leipzig 11 of 39
+- [x] Live run of scrape + normalise (2026-10-28): state portal 83 scraped, 9 kept (7 Dresden,
+  2 Leipzig), all with a detail-page date and `source_coordinates`, no flags; city portal 39
+  scraped, 10 kept, all `unresolved` + `missing_publication_date`; no errors
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 4.
 

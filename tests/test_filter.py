@@ -1,11 +1,8 @@
-from pathlib import Path
-
 import pytest
 
 from harvester.config import IndustrialFilterConfig, load_config
 from harvester.pipeline.filter import IndustrialFilter
-
-SETTINGS_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yml"
+from tests.conftest import SETTINGS_PATH
 
 
 @pytest.fixture

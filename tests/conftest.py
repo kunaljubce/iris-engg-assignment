@@ -5,9 +5,10 @@ import httpx
 import pytest
 
 from harvester.adapters.fetch import make_client
-from harvester.config import ScrapingConfig
+from harvester.config import HarvesterConfig, ScrapingConfig, load_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
+SETTINGS_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yml"
 
 MockClient = Callable[[dict[str, str | int]], httpx.Client]
 
@@ -46,3 +47,9 @@ def mock_client(scraping_config: ScrapingConfig) -> MockClient:
         return make_client(scraping_config, httpx.MockTransport(handler))
 
     return build
+
+
+@pytest.fixture
+def harvester_config(scraping_config: ScrapingConfig) -> HarvesterConfig:
+    """The repo's settings.yml, with the instant scraping settings."""
+    return load_config(SETTINGS_PATH).model_copy(update={"scraping": scraping_config})
