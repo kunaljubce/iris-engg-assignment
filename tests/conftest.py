@@ -1,14 +1,19 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from sqlalchemy import Engine, text
 
 from harvester.adapters.fetch import make_client
 from harvester.config import HarvesterConfig, ScrapingConfig, load_config
+from harvester.db.engine import DatabaseConfigError, load_database_settings, make_engine
 
-FIXTURES = Path(__file__).parent / "fixtures"
-SETTINGS_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = REPO_ROOT / "tests" / "fixtures"
+SETTINGS_PATH = REPO_ROOT / "config" / "settings.yml"
 
 MockClient = Callable[[dict[str, str | int]], httpx.Client]
 
@@ -53,3 +58,37 @@ def mock_client(scraping_config: ScrapingConfig) -> MockClient:
 def harvester_config(scraping_config: ScrapingConfig) -> HarvesterConfig:
     """The repo's settings.yml, with the instant scraping settings."""
     return load_config(SETTINGS_PATH).model_copy(update={"scraping": scraping_config})
+
+
+@pytest.fixture(scope="session")
+def _migrated_test_engine() -> Iterator[Engine]:
+    """Engine on iris_test with the schema migrated to head, once per test session.
+
+    Skips when the database settings are missing (no POSTGRES_PASSWORD), so the unit tests
+    run without Docker. Settings present but database unreachable is a failure, not a skip.
+    """
+    try:
+        settings = load_database_settings()
+    except DatabaseConfigError as exc:
+        pytest.skip(f"db tests need the PostGIS test database: {exc}")
+
+    engine = make_engine(settings.test_url)
+    # No alembic.ini: that would also reconfigure logging for the whole test session
+    alembic_config = AlembicConfig()
+    alembic_config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    with engine.connect() as connection:
+        alembic_config.attributes["connection"] = connection
+        command.upgrade(alembic_config, "head")
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def db_engine(_migrated_test_engine: Engine) -> Engine:
+    """The migrated iris_test engine, emptied before each test.
+
+    Emptied rather than wrapped in a rolled-back transaction: run_source commits the
+    ingest_run row and the upsert separately on purpose, so a test can't hold them in one."""
+    with _migrated_test_engine.begin() as connection:
+        connection.execute(text("TRUNCATE iris_staging.signal_ingest, iris_staging.ingest_run"))
+    return _migrated_test_engine

@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool, text
+from sqlalchemy import Connection, create_engine, pool, text
 
 from harvester.config import DatabaseSettings
 
@@ -43,27 +43,36 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations against the database configured by the POSTGRES_* settings."""
+    """Run migrations against the database configured by the POSTGRES_* settings, or on the
+    connection passed in `config.attributes["connection"]` (the tests use it for iris_test)."""
+    given: Connection | None = config.attributes.get("connection")
+    if given is not None:
+        _run_on(given)
+        return
+
     engine = create_engine(
         DatabaseSettings().url,
         poolclass=pool.NullPool,
         hide_parameters=True,
     )
-
     with engine.connect() as connection:
-        # Committed separately so Alembic's own transaction starts clean and can create
-        # the version table inside the schema
-        connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {STAGING_SCHEMA}"))
-        connection.commit()
+        _run_on(connection)
 
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            version_table_schema=VERSION_TABLE_SCHEMA,
-        )
 
-        with context.begin_transaction():
-            context.run_migrations()
+def _run_on(connection: Connection) -> None:
+    # Committed separately so Alembic's own transaction starts clean and can create
+    # the version table inside the schema
+    connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {STAGING_SCHEMA}"))
+    connection.commit()
+
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        version_table_schema=VERSION_TABLE_SCHEMA,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
 
 
 if context.is_offline_mode():

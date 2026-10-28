@@ -187,6 +187,7 @@ iris-engg-assignment/
       __init__.py
       __main__.py                   # `python -m harvester`: calls cli.main()
       cli.py                        # click CLI; `harvester` console script (pyproject)
+      runner.py                     # run_source(): one source end to end, tracked in ingest_run
       config.py                     # pydantic-settings: POSTGRES_* -> DB URL; settings.yml
       models.py                     # ScrapedRecord, NormalisedRecord
       db/
@@ -207,11 +208,15 @@ iris-engg-assignment/
       reporting/
         __init__.py
         quality_report.py           # generates report from ingest_run data
+  .github/
+    workflows/
+      ci.yml                        # ruff, mypy, migrations, all tests on push to main
   sql/
     validation_queries.sql          # post-ingest verification
   tests/
     __init__.py
     conftest.py                     # fixture loader, httpx MockTransport, DB fixtures
+    db_helpers.py                   # record / run builders for the db tests
     fixtures/
       SOURCES.md                    # provenance: source URL + capture date per fixture
       sachsen_dresden_listing_beendet.html     # marker JSON, "von 52"
@@ -225,7 +230,8 @@ iris-engg-assignment/
     test_geocode.py
     test_upsert.py                  # includes re-run idempotency + duplicate tests
     test_bounding_box.py            # out-of-bounds rejection + ST_Transform, against PostGIS
-    test_pipeline_integration.py
+    test_pipeline_integration.py    # run_source over fixtures: counts, re-run, errors, crash
+    test_cli.py                     # source/city selection, --dry-run without a database
     test_quality_report.py
   sample_output/
     signal_ingest_sample.csv
@@ -402,8 +408,9 @@ is **no change detection**: an existing row is always rewritten with the latest 
 in the brief consumes "what changed", so telling a real change apart from a re-scrape isn't
 worth a hash column and its tests (see "What We Are NOT Doing").
 
-**Step 0: de-duplicate the batch in Python.** PostgreSQL rejects an `INSERT ... ON CONFLICT
-DO UPDATE` that touches the same key twice ("command cannot affect row a second time").
+**Step 0: de-duplicate the batch in Python.** Records are written one statement each, so a
+repeated key would not fail, but it would be written twice and counted as 1 inserted + 1
+updated for a single row, and the repeat (a source problem) would go unseen.
 Records with a repeated `(source, source_record_id)` in one batch (e.g. a card shown on two
 listing pages while the Leipzig register re-sorts) are collapsed to the last occurrence. Each one
 dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
@@ -675,6 +682,8 @@ class ScrapedRecord(BaseModel):
   Nothing is silently dropped. The quality report surfaces both kinds.
 - **Graceful degradation:** If one adapter fails entirely (e.g., portal is down), the
   other adapters still run. The failed adapter's `ingest_run` records `status = 'failed'`.
+  "Fails entirely" means an exception anywhere in the run, or no records at all plus at least
+  one error. Some pages failing while others work is a `completed` run with those errors.
 
 ---
 
@@ -1439,7 +1448,7 @@ Decided in this plan; confirm or update each one as the step is built.
 
 #### Manual Verification
 - [x] Filter decisions on the fixtures look right (no obvious misses or false hits). Checked
-  with a script, since `--dry-run` arrives in Phase 4: Dresden 5 of 52, Leipzig 11 of 39
+  with a script, since `--dry-run` arrives in Phase 4: Dresden 5 of 52, Leipzig 10 of 39
 - [x] Live run of scrape + normalise (2026-10-28): state portal 83 scraped, 9 kept (7 Dresden,
   2 Leipzig), all with a detail-page date and `source_coordinates`, no flags; city portal 39
   scraped, 10 kept, all `unresolved` + `missing_publication_date`; no errors
@@ -1448,7 +1457,7 @@ Decided in this plan; confirm or update each one as the step is built.
 
 ---
 
-## Phase 4: Upsert, CLI, and Integration
+## Phase 4: Upsert, CLI, and Integration ✅
 
 ### Overview
 
@@ -1457,78 +1466,76 @@ and integration tests including idempotent re-run and duplicate detection.
 
 ### Changes Required
 
-#### 1. `src/harvester/db/upsert.py`
+#### 1. `src/harvester/db/engine.py` + db test fixtures ✅
 
-- `upsert_records(conn: Connection, records: list[NormalisedRecord], run: IngestRun) -> UpsertStats`,
-  using `text()` statements on a SQLAlchemy Core connection (no ORM session)
-- Implements **Upsert Logic** exactly, in one transaction per batch:
-  - de-duplicate the batch, logging dropped duplicates as `duplicate_in_batch`
-  - `INSERT ... ON CONFLICT (source, source_record_id) DO UPDATE ... RETURNING (xmax = 0)`
-- Returns `UpsertStats(inserted, updated, duplicates_in_batch)`, derived from `RETURNING`
-  as described there.
+- `make_engine(url=None)`: sync SQLAlchemy `Engine` (psycopg 3), the harvester database by
+  default, `hide_parameters=True`. `load_database_settings()` turns a missing
+  `POSTGRES_PASSWORD` into `DatabaseConfigError` naming the variable.
+- `migrations/env.py` accepts a connection in `config.attributes["connection"]` (the standard
+  Alembic hook), so the tests migrate `iris_test` without touching `iris`.
+- `conftest.py`: a session fixture migrates `iris_test` to head (skips if the settings are
+  missing, fails if they're present but the database is unreachable); `db_engine` empties
+  both tables before each test. `--dry-run` never creates an engine.
 
-#### 2. `src/harvester/cli.py` (+ `__main__.py`)
+#### 2. `src/harvester/db/upsert.py` ✅
+
+- `upsert_records(conn, records, run_id) -> UpsertStats(inserted, updated, duplicates)`, on
+  the caller's connection and transaction; `text()` statements, no ORM.
+- Implements **Upsert Logic**: drop repeated keys (last kept, each one a `duplicate_in_batch`
+  error), then one `INSERT ... ON CONFLICT ON CONSTRAINT uq_source_record DO UPDATE ...
+  RETURNING (xmax = 0)` per record. `ST_Transform` to EPSG:25832 in the statement.
+
+#### 3. `src/harvester/runner.py` ✅
+
+- `scrape_and_normalise(client, source, config)`: the network half, no database (used by
+  `--dry-run`).
+- `run_source(engine, client, source, config) -> RunSummary`: never raises.
+  1. Commit the `ingest_run` row as `running` (with `config_snapshot`).
+  2. Scrape + normalise.
+  3. In one transaction: upsert, then write the run's counts, errors and final status.
+  4. On any exception that transaction rolls back and the run is marked `failed` with
+     `error_message`.
+- One `ingest_run` per source per invocation. `city` is set when the run covers one city
+  (city portal, or `--city`), NULL when the state portal covers both.
+- `records_rejected` counts the record-level errors (`missing_id`, `missing_title`,
+  `unexpected_row_layout`, `unexpected_status`); page-level ones are only in `errors`.
+
+#### 4. `src/harvester/cli.py` (+ `__main__.py`) ✅
+
+- `harvester run [--dry-run] [--source NAME] [--city SLUG]` (also `python -m harvester run`).
+  An unknown source or city is a usage error, not an empty run.
+- `--dry-run` prints every scraped record (KEEP with keywords, date, geocode, flags, or `-`)
+  and the scrape errors; it needs no database.
+- A normal run prints one summary line per source and exits 1 if any run failed.
+- `harvester report` comes with the report itself in Phase 5.
+
+#### 5. Tests ✅
 
 ```python
-@click.group()
-def cli(): ...
+# tests/test_upsert.py  (db)
+def test_insert_new_records():
+def test_rerun_creates_no_duplicates():        # 0 inserted, N updated; ids, created_at unchanged
+def test_rerun_overwrites_changed_content():   # same id, new title, new ingest_run_id
+def test_duplicate_keys_in_one_batch():        # one row (the last), duplicate_in_batch
+def test_filter_config_change_updates_keywords():
+def test_same_id_from_two_sources_is_two_rows():
 
-@cli.command()
-@click.option("--dry-run", is_flag=True, help="Print records without writing to DB")
-@click.option("--source", type=str, help="Run only this source")
-@click.option("--city", type=str, help="Run only this city")
-def run(dry_run: bool, source: str | None, city: str | None) -> None: ...
+# tests/test_bounding_box.py  (db)
+def test_out_of_bounds_stored_with_null_geometry():
+def test_in_bounds_stored_with_geometry():      # SRID 25832
+def test_transform_control_point():             # Frauenkirche, pyproj value, 1 m tolerance
 
-@cli.command()
-def report(): ...
-```
+# tests/test_pipeline_integration.py  (db, mocked portals)
+def test_full_pipeline_fixture_to_db():         # 52 -> 5 and 39 -> 10, dates, flags, traced runs
+def test_full_pipeline_twice_is_idempotent():   # (0, 5) and (0, 10); same ids
+def test_errors_visible_in_ingest_run():        # unexpected_status in errors, records_rejected
+def test_unreachable_source_is_a_failed_run():  # 503 -> failed, error_message
+def test_crash_rolls_back_records_and_fails_run():
 
-#### 3. `src/harvester/db/engine.py`
-
-Sync SQLAlchemy `Engine` (psycopg 3) from `DatabaseSettings().url`, created with
-`hide_parameters=True`. A missing `POSTGRES_PASSWORD` fails with a clear message.
-`--dry-run` needs no database.
-
-#### 4. Integration tests
-
-All tests here are marked `@pytest.mark.db`.
-
-```python
-# tests/test_upsert.py
-def test_insert_new_records(db_session):
-    """First run inserts all records."""
-
-def test_rerun_creates_no_duplicates(db_session):
-    """Second run with same data: 0 inserted, N updated; row count, ids and created_at unchanged."""
-
-def test_rerun_overwrites_changed_content(db_session):
-    """Modified record is rewritten in place: new title, new ingest_run_id, same id."""
-
-def test_duplicate_keys_in_one_batch(db_session):
-    """Same key twice in a batch -> one row, no DB error, duplicate logged."""
-
-def test_filter_config_change_updates_keywords(db_session):
-    """Re-run with a new keyword list rewrites matched_keywords on existing rows."""
-
-# tests/test_bounding_box.py
-def test_out_of_bounds_stored_with_null_geometry(db_session):
-    """Record with bad coords stored but geometry is NULL, status is rejected."""
-
-def test_in_bounds_stored_with_geometry(db_session):
-    """Valid coords produce non-NULL geometry with ST_SRID = 25832."""
-
-def test_transform_control_point(db_session):
-    """A known WGS84 point lands on its EPSG:25832 coordinates, tolerance 1 m."""
-
-# tests/test_pipeline_integration.py
-def test_full_pipeline_fixture_to_db(db_session, mock_client):
-    """Mocked fixtures -> adapters -> filter -> detail -> geocode -> upsert; verify DB state."""
-
-def test_full_pipeline_twice_is_idempotent(db_session, mock_client):
-    """End-to-end re-run over the same fixtures adds no rows."""
-
-def test_errors_visible_in_ingest_run(db_session, mock_client):
-    """Malformed marker and 404 detail page appear in ingest_run.errors / quality_flags."""
+# tests/test_cli.py
+def test_select_by_city_narrows_state_portal():
+def test_unknown_source_or_city_is_an_error():
+def test_dry_run_prints_decisions_without_database():
 ```
 
 ### Choices You May Be Asked About
@@ -1542,32 +1549,51 @@ Decided in this plan; confirm or update each one as the step is built.
 - **Why trust auth in CI rather than a password secret?** The database is a throwaway container
   on the runner, so there is no credential to store or leak; `POSTGRES_PASSWORD` is set only
   because `DatabaseSettings` requires a value. (Built before Phase 4)
+- **What does one `ingest_run` row cover?** One source in one invocation. The state portal's
+  scrape reads both cities in one go, so `city` is NULL there; the report breaks rows down by
+  city from `signal_ingest`. (Step 3, built)
+- **Why is the run row committed before the scrape?** So a run that crashes or hangs is still
+  on record (`running` / `failed`), not lost with a rolled-back transaction. (Step 3, built)
+- **Why do the records and the run's `completed` status commit together?** A run is either
+  fully written with its counts, or not at all and marked `failed`; never half-written. A test
+  crashes after the upsert and checks no rows remain. (Step 3, built)
+- **What happens when one portal is down?** Its run is `failed` with the error, the other
+  source still runs, and the CLI exits 1 so a scheduler notices. (Step 3, built)
+- **Why a separate `runner.py` instead of logic in the CLI?** The integration tests call the
+  same `run_source` the CLI calls, without click; the CLI only parses options and prints.
+  (Step 3, built)
+- **Why do the db tests truncate instead of rolling back?** `run_source` commits twice on
+  purpose (see above), which an outer test transaction can't contain. (Step 1, built)
 - **How is the run idempotent?** `UNIQUE (source, source_record_id)` plus `ON CONFLICT DO
   UPDATE`; a re-run can't add rows.
 - **Why no change detection (hash column)?** Nothing in the brief consumes "what changed"; an
   existing row is simply rewritten with the latest values.
 - **How are inserted vs updated counted?** `RETURNING (xmax = 0)`: true only for a freshly
-  inserted row.
-- **Why de-duplicate the batch in Python first?** PostgreSQL rejects an `ON CONFLICT DO UPDATE`
-  that hits the same key twice in one statement; each dropped duplicate is logged.
+  inserted row. Covered by the re-run tests. (Step 2, built)
+- **Why de-duplicate the batch in Python first?** Otherwise one row would count as 1 inserted
+  + 1 updated, and the repeat itself would go unseen; each dropped duplicate is logged as a
+  `duplicate_in_batch` error. (Step 2, built)
 - **Why the EPSG:25832 transform in SQL?** `ST_Transform` in the upsert keeps pyproj out of the
-  dependencies; a test checks a control point.
+  dependencies; a test checks a control point computed independently with pyproj. (Step 2,
+  built)
 - **Why are rows never deleted?** A plan missing from one run may just be a portal hiccup;
   staging keeps what was seen, with `updated_at` as "last seen".
 
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `pytest tests/test_upsert.py tests/test_bounding_box.py tests/test_pipeline_integration.py` -- all pass
-- [ ] `python -m harvester run --dry-run` executes without error (with fixtures or mocked adapters)
-- [ ] `ruff check .` passes
-- [ ] `mypy .` passes
+- [x] `pytest tests/test_upsert.py tests/test_bounding_box.py tests/test_pipeline_integration.py` -- all pass
+- [x] `python -m harvester run --dry-run` executes without error (mocked portals, `test_cli.py`)
+- [x] `ruff check .` passes
+- [x] `mypy .` passes
 
-#### Manual Verification
-- [ ] `python -m harvester run` against live portals populates the DB
-- [ ] `SELECT count(*), source FROM iris_staging.signal_ingest GROUP BY source` shows expected counts
-- [ ] Re-run produces 0 inserts and the same row count
-- [ ] No `count_mismatch` errors: marker counts match the "von N" / card counts
+#### Manual Verification (live, 2026-10-28)
+- [x] `python -m harvester run` against live portals populates the DB: state portal 83 scraped,
+  9 inserted (7 Dresden, 2 Leipzig, all with point and date); city portal 39 scraped, 10
+  inserted (all `unresolved`, no date)
+- [x] `SELECT count(*), source FROM iris_staging.signal_ingest GROUP BY source` shows 9 + 10
+- [x] Re-run produces 0 inserts (9 + 10 updated) and the same row count
+- [x] No `count_mismatch` errors (0 errors in both runs)
 
 **Checkpoint:** Pause for confirmation before proceeding to Phase 5.
 
@@ -1762,7 +1788,9 @@ Decided in this plan; confirm or update each one as the step is built.
   PostgreSQL-only features (`ON CONFLICT`, `xmax`, `ST_Transform`, `TEXT[]`), so a
   different engine would test different behaviour.
   - A session-scoped fixture runs `alembic upgrade head` against `iris_test`.
-  - Each test runs in a transaction that is rolled back afterwards.
+  - Each test starts by emptying both tables (`TRUNCATE`). Not a rolled-back transaction:
+    `run_source` commits the run row and the upsert separately on purpose, so a test can't
+    hold them in one outer transaction.
   - Tests marked `db` are **skipped with an explicit reason** if the database settings can't
     be loaded (no `POSTGRES_PASSWORD` in the environment or `.env`). If they load but the
     database is unreachable, the tests **fail**: configured-but-broken is an error, not a skip. The non-DB suite (parsing, filter, normalise, geocode, fetch) runs with no Docker.
