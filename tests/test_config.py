@@ -19,7 +19,13 @@ SETTINGS_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yml"
 def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Run from an empty directory so a developer's real .env can't leak into load_config()
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("HARVESTER_USER_AGENT", raising=False)
+    # Variables already in the environment (CI's job env, or uv's UV_ENV_FILE loading .env)
+    # would override the defaults these tests check
+    for name in [
+        *(f"POSTGRES_{f.upper()}" for f in DatabaseSettings.model_fields),
+        "HARVESTER_USER_AGENT",
+    ]:
+        monkeypatch.delenv(name, raising=False)
 
 
 def write_settings(tmp_path: Path, mutate: Callable[[dict[str, Any]], None]) -> Path:
