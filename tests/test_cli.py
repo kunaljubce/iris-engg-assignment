@@ -2,19 +2,18 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from harvester.adapters import leipzig_stadtportal
+from harvester.adapters import sachsen_portal
 from harvester.cli import cli, select_sources
-from harvester.config import HarvesterConfig, LeipzigStadtSource, SachsenSource
+from harvester.config import HarvesterConfig
 from tests.conftest import MockClient, load_fixture
 
 
 def test_select_by_city_narrows_state_portal(harvester_config: HarvesterConfig) -> None:
-    sachsen, leipzig = select_sources(harvester_config, None, "leipzig")
+    [leipzig] = select_sources(harvester_config, None, "leipzig")
+    [dresden] = select_sources(harvester_config, None, "dresden")
 
-    assert isinstance(sachsen, SachsenSource) and sachsen.city_slugs == ["leipzig"]
-    assert isinstance(leipzig, LeipzigStadtSource)
-    [only] = select_sources(harvester_config, None, "dresden")
-    assert only.city_slugs == ["dresden"]
+    assert leipzig.city_slugs == ["leipzig"]
+    assert dresden.city_slugs == ["dresden"]
 
 
 def test_unknown_source_or_city_is_an_error() -> None:
@@ -32,13 +31,20 @@ def test_dry_run_prints_decisions_without_database(
     harvester_config: HarvesterConfig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    leipzig = harvester_config.sources[1]
-    assert isinstance(leipzig, LeipzigStadtSource)
+    # One listing (Dresden, finished plans) and every match's detail page as a 404
+    [sachsen] = harvester_config.sources
+    sachsen = sachsen.model_copy(
+        update={"cities": sachsen.cities[:1], "status_filters": ["BEENDETE"]}
+    )
+    harvester_config = harvester_config.model_copy(update={"sources": [sachsen]})
+    detail = "https://buergerbeteiligung.sachsen.de/portal/dresden/beteiligung/themen/{}"
+    matches = ["1066719", "1033966", "1034723", "1054740", "1065790"]
     client = mock_client(
         {
-            leipzig_stadtportal.listing_url(leipzig): load_fixture(
-                "leipzig_stadt_listing_im_verfahren.html"
-            )
+            sachsen_portal.listing_url(sachsen, "dresden", "BEENDETE"): load_fixture(
+                "sachsen_dresden_listing_beendet.html"
+            ),
+            **{detail.format(record_id): 404 for record_id in matches},
         }
     )
 
@@ -53,10 +59,10 @@ def test_dry_run_prints_decisions_without_database(
 
     monkeypatch.setattr("harvester.cli.make_engine", no_database)
 
-    result = CliRunner().invoke(cli, ["run", "--dry-run", "--source", "leipzig_stadtportal"])
+    result = CliRunner().invoke(cli, ["run", "--dry-run", "--source", "sachsen_portal"])
 
     assert result.exit_code == 0, result.output
-    assert (
-        "leipzig_stadtportal: 39 scraped, 10 industrial, 29 filtered out, 0 errors" in result.output
+    assert "sachsen_portal: 52 scraped, 5 industrial, 47 filtered out, 0 errors" in result.output
+    assert "KEEP Bebauungsplan Nr. 3017, Dresden-Hellerau Nr. 13, Gewerbegebiet Flughafen" in (
+        result.output
     )
-    assert "KEEP Bebauungsplan Nr. 911 Industriegebiet" in result.output

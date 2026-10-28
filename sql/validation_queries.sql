@@ -81,10 +81,3 @@ WHERE s.ingest_run_id <> (
       AND (r.city IS NULL OR r.city = s.city)
     ORDER BY r.started_at DESC LIMIT 1
 );
-
-\echo '10. The same plan on both portals: same city and plan number (kept as separate signals)'
-SELECT city, substring(title FROM '(?:Nr\.|Nummer)\s*(\d+(?:\.\d+)?)') AS plan_number,
-       array_agg(source || ':' || source_record_id ORDER BY source) AS records
-FROM iris_staging.signal_ingest
-GROUP BY 1, 2
-HAVING count(DISTINCT source) > 1;

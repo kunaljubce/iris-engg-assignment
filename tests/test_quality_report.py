@@ -88,7 +88,7 @@ def test_report_shows_failed_run_and_its_errors(db_engine: Engine) -> None:
         for i in range(7)
     ]
     with db_engine.begin() as conn:
-        run_id = make_run(conn, source="leipzig_stadtportal")
+        run_id = make_run(conn)
         finish_run(
             conn,
             run_id,
@@ -101,9 +101,9 @@ def test_report_shows_failed_run_and_its_errors(db_engine: Engine) -> None:
         report = quality_report(conn)
 
     lines = table_lines(report)
-    assert "leipzig_stadtportal all failed 2026-10-28 10:00 0 0 0 0 0 7" in lines
-    assert "leipzig_stadtportal run_failed 1 no records; first error: HTTP 503" in lines
-    assert "leipzig_stadtportal retries_exhausted 7 HTTP 503" in lines
+    assert "sachsen_portal all failed 2026-10-28 10:00 0 0 0 0 0 7" in lines
+    assert "sachsen_portal run_failed 1 no records; first error: HTTP 503" in lines
+    assert "sachsen_portal retries_exhausted 7 HTTP 503" in lines
 
 
 def test_report_on_empty_database(db_engine: Engine) -> None:

@@ -64,7 +64,7 @@ def test_filter_config_change_updates_keywords(db_engine: Engine) -> None:
 
 
 def test_same_id_from_two_sources_is_two_rows(db_engine: Engine) -> None:
-    batch = [make_record("1"), make_record("1", source="leipzig_stadtportal")]
+    batch = [make_record("1"), make_record("1", source="other_source")]
     with db_engine.begin() as conn:
         stats = upsert_records(conn, batch, make_run(conn))
 

@@ -26,21 +26,6 @@ def sachsen_record(
     )
 
 
-def leipzig_record(
-    thema: list[str], location_text: str | None = "Nord / Eutritzsch"
-) -> ScrapedRecord:
-    return ScrapedRecord(
-        source="leipzig_stadtportal",
-        source_record_id="16187322",
-        city="leipzig",
-        title="Bebauungsplan Nr. 486 Weheweg",
-        detail_url="https://www.leipzig.de/detail/projekt/16187322",
-        location_text=location_text,
-        thema=thema,
-        raw_data={"thema": thema},
-    )
-
-
 def test_publication_date_is_zeitraum_start(
     mock_client: MockClient, harvester_config: HarvesterConfig
 ) -> None:
@@ -74,28 +59,21 @@ def test_unparseable_date_flagged_not_raised(
     assert parse_publication_date(zeitraum) == expected
 
 
-def test_leipzig_row_unresolved_without_date(
+def test_marker_without_coordinates_or_address_is_unresolved(
     mock_client: MockClient, harvester_config: HarvesterConfig
 ) -> None:
-    # No routes: the city portal's detail pages are never fetched
-    [record] = normalise([leipzig_record(["Gewerbe"])], mock_client({}), harvester_config).records
+    client = mock_client(
+        {DETAIL_URL.format("1069133"): load_fixture("sachsen_dresden_detail.html")}
+    )
+    no_location = sachsen_record().model_copy(
+        update={"lon": None, "lat": None, "location_text": None}
+    )
 
-    assert record.matched_keywords == ["thema:Gewerbe"]
-    assert record.publication_date is None
+    [record] = normalise([no_location], client, harvester_config).records
+
     assert (record.lon, record.lat, record.geocode_status) == (None, None, "unresolved")
-    assert record.geocode_reason == "source gives district only: Nord / Eutritzsch"
-    assert record.quality_flags == ["missing_publication_date"]
-
-
-def test_leipzig_row_without_district_is_missing_location(
-    mock_client: MockClient, harvester_config: HarvesterConfig
-) -> None:
-    [record] = normalise(
-        [leipzig_record(["Gewerbe"], location_text=None)], mock_client({}), harvester_config
-    ).records
-
-    assert record.geocode_reason == "source gives no location"
-    assert record.quality_flags == ["missing_publication_date", "missing_location"]
+    assert record.geocode_reason == "marker has no coordinates"
+    assert record.quality_flags == ["missing_location"]
 
 
 def test_detail_fetched_only_for_matches(
@@ -143,9 +121,16 @@ def test_out_of_bounds_marker_is_rejected(
 def test_non_industrial_records_dropped_and_counted(
     mock_client: MockClient, harvester_config: HarvesterConfig
 ) -> None:
-    records = [leipzig_record(["Wohnen"]), leipzig_record([]), leipzig_record(["Gewerbe"])]
+    client = mock_client(
+        {DETAIL_URL.format("1069133"): load_fixture("sachsen_dresden_detail.html")}
+    )
+    records = [
+        sachsen_record("1", title="Wohngebiet Am Park"),
+        sachsen_record("2", title="Schulcampus Nord"),
+        sachsen_record(),
+    ]
 
-    result = normalise(records, mock_client({}), harvester_config)
+    result = normalise(records, client, harvester_config)
 
     assert len(result.records) == 1
     assert result.filtered_out == 2
