@@ -2,6 +2,62 @@
 
 One adapter, `sachsen_portal.py`, runs once per city and status and produces `ScrapedRecord`s. It fetches pages with one shared `httpx.Client` and parses them with BeautifulSoup. Parsing functions take an HTML string and return data, so tests feed them fixture files directly. A shared pipeline applies the industrial keyword filter, fetches the detail page of each match for its publication date, checks coordinates against the city bounding box, and upserts into PostGIS, where `ST_Transform` produces the EPSG:25832 point.
 
+**Sync throughout.** The harvester is a sequential, deliberately throttled crawler, so it uses:
+- a sync `httpx.Client`
+- a sync SQLAlchemy `Engine` / `Session` with psycopg 3
+- plain synchronous pytest tests (no `pytest-asyncio`)
+
+`uv.lock` and `.python-version` (3.12) are committed, so every checkout resolves the same interpreter and package versions.
+
+## Key Discoveries
+
+All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, provenance in `SOURCES.md`).
+
+1. **One portal, server-rendered, and everything needed is a plain GET.** Dresden and Leipzig are both on the Saxon state portal (`buergerbeteiligung.sachsen.de`, PrimeFaces). No browser automation is needed: `httpx` + BeautifulSoup.
+
+2. **The state portal embeds per-procedure coordinates.** Each listing contains an OpenLayers call `map.drawMarkers([...])` whose JSON array has one entry per result, **across all pages**: `id`, `kategorie` (the title, HTML-escaped), `href`, `latitude`, `longitude` (WGS84), `adresse` (street address). All 83 markers captured have coordinates inside the city bounding boxes. Geometry comes from the source, not from a lookup table.
+
+3. **EPSG zone mismatch.** Both cities are east of 12 deg E (Leipzig ~12.4, Dresden ~13.7), i.e. outside the nominal coverage of EPSG:25832 (UTM 32N, 6--12 deg E); their native zone is EPSG:25833. The brief mandates 25832, so points are transformed with PostGIS `ST_Transform` and the zone note goes in the README. The bounding-box check catches gross errors.
+
+4. **The status filter is a GET parameter**: `&status=AKTUELLE` (the default view) or `&status=BEENDETE` (finished). Uppercase only; lowercase is silently ignored. Cards render 10 per page behind a PrimeFaces AJAX paginator ("1 - 10 von 52"), but the marker JSON already lists all 52, so the adapter reads the markers and never pages. The "von N" count, when present, is a completeness check against the marker count.
+
+5. **IDs come from one shared sequence across cities**, so `source_record_id` is unique on the portal. The detail URL must use the marker's `href`: a Dresden ID under `/portal/leipzig/` silently redirects to the Leipzig listing (HTTP 200).
+
+6. **Publication date = start of the "Zeitraum".** There is no separate "published on" field. The detail page's `li.nbp-statistik--laufzeit` ("Zeitraum 12.10.2026 bis 13.11.2026") is the period in which the draft is publicly "veröffentlicht" (the detail text says so: "vom ... bis ... veröffentlicht"; BauGB § 3 (2)). Its start date is the publication date.
+
+### Portal Details
+
+| Attribute | Saxon State Portal (Dresden + Leipzig) |
+|---|---|
+| Listing URL | `/portal/{city}/beteiligung/themen?format=Bauleitplan&status={AKTUELLE\|BEENDETE}` |
+| Framework | Jakarta Faces / PrimeFaces |
+| What is read | `map.drawMarkers([...])` JSON (all results, no paging) |
+| Pagination | Not needed (markers list every result) |
+| Detail URL | marker `href`: `/portal/{city}/beteiligung/themen/{id}` |
+| Stable ID | marker `id` (numeric) |
+| Coordinates | marker `latitude` / `longitude` (WGS84) |
+| Publication date | detail page `li.nbp-statistik--laufzeit`, start date |
+| Items (2026-10-27) | Dresden 8 current + 52 finished; Leipzig 2 current + 21 finished |
+
+## What We Are NOT Doing
+
+- Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 4).
+- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply coordinates; a marker without them is stored `unresolved` with the reason.
+- Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
+- Matching keywords in descriptions. The filter reads titles: plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for matches, for the publication date.
+- Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
+- Downloading or parsing PDF plan documents.
+- Building a web UI or API layer.
+- Handling BundID authentication (public pages only).
+- Production hardening (see the scope note in the [plan's Overview](2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md#overview)). For example, no SQLAlchemy `naming_convention`: it only pays off when later migrations alter or drop constraints by name, and this repo is expected to have the single migration `001`. Constraints and indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
+- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the `db`-marked tests run every query against it.
+- Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
+- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
+- Storing non-industrial records. The objective is to *filter*; non-matches are only counted (`records_filtered_out`). `--dry-run` prints every record with its filter decision for tuning the keyword list.
+- Columns the brief doesn't ask for (plan type, plan number, procedure step, status, participation end date). They are kept as scraped in `raw_data`.
+- Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
+- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an older `ingest_run_id` (validation check 9).
+
 ## Database Schema
 
 Every column traces back to a line in the brief; anything else scraped stays in `raw_data`.
@@ -28,7 +84,7 @@ No secondary indexes: at <1000 rows a sequential scan beats any index, and nothi
 
 ### Upsert Logic
 
-Idempotency comes from the natural key: `uq_source_record UNIQUE (source, source_record_id)` plus `INSERT ... ON CONFLICT DO UPDATE`. Re-running over the same data cannot add rows. There is **no change detection**: an existing row is always rewritten with the latest values. Nothing in the brief consumes "what changed", so telling a real change apart from a re-scrape isn't worth a hash column and its tests (see "What We Are NOT Doing").
+Idempotency comes from the natural key: `uq_source_record UNIQUE (source, source_record_id)` plus `INSERT ... ON CONFLICT DO UPDATE`. Re-running over the same data cannot add rows. There is **no change detection**: an existing row is always rewritten with the latest values. Nothing in the brief consumes "what changed", so telling a real change apart from a re-scrape isn't worth a hash column and its tests (see [What We Are NOT Doing](#what-we-are-not-doing)).
 
 **Step 0: de-duplicate the batch in Python.** Records are written one statement each, so a repeated key would not fail, but it would be written twice and counted as 1 inserted + 1 updated for a single row, and the repeat (a source problem) would go unseen. Records with a repeated `(source, source_record_id)` in one batch (e.g. a procedure that moves from `AKTUELLE` to `BEENDETE` between the two listing requests) are collapsed to the last occurrence. Each one dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
 
@@ -69,7 +125,7 @@ RETURNING (xmax = 0) AS inserted;
 
 `xmax = 0` is the standard PostgreSQL test for whether a row from an `ON CONFLICT` upsert was newly inserted. It's covered by a test.
 
-**How it's executed:** the statement is a SQLAlchemy `text()` with named parameters, run with one parameter dict per record (no ORM models; see Phase 1). psycopg 3 adapts Python lists to `TEXT[]`. Dicts for `JSONB` must be wrapped in `psycopg.types.json.Jsonb(...)`, or binding fails. Records are executed one statement each, in a loop inside the batch's single transaction, collecting each `RETURNING` row. That's simple, keeps the per-record counting obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one `executemany` call isn't something to rely on with `text()`.
+**How it's executed:** the statement is a SQLAlchemy `text()` with named parameters, run with one parameter dict per record (no ORM models; see [What We Are NOT Doing](#what-we-are-not-doing)). psycopg 3 adapts Python lists to `TEXT[]`. Dicts for `JSONB` must be wrapped in `psycopg.types.json.Jsonb(...)`, or binding fails. Records are executed one statement each, in a loop inside the batch's single transaction, collecting each `RETURNING` row. That's simple, keeps the per-record counting obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one `executemany` call isn't something to rely on with `text()`.
 
 **Rows are never deleted.** A plan that disappears from the portal, or stops matching after the keyword list changes, keeps its row; its `ingest_run_id` then points at an older run than the latest one covering its city (validation check 9 lists these).
 
@@ -121,6 +177,11 @@ class IndustrialFilter:
 
 `evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
 
-Only the title is read; see "What We Are NOT Doing" for why not descriptions. The filter runs on listing data, **before** any detail page is fetched, so only matches cost an extra request. Only records with `is_industrial = True` are stored; `matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its filter decision, so false negatives can be checked while tuning the keyword list.
+Only the title is read; see [What We Are NOT Doing](#what-we-are-not-doing) for why not descriptions. The filter runs on listing data, **before** any detail page is fetched, so only matches cost an extra request. Only records with `is_industrial = True` are stored; `matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its filter decision, so false negatives can be checked while tuning the keyword list.
 
----
+## Performance Considerations
+
+- **Request volume (2026-10-27):** 4 listings (2 cities x 2 statuses) + one detail page per match (~9) = ~13 requests, under a minute at a 2 s delay. The live run is quick enough to demo; re-run and idempotency demos also work against fixtures.
+- **Database:** Small table (<1000 rows, only industrial matches). No indexes beyond the primary key and `uq_source_record`; see [Database Schema](#database-schema).
+- **Memory:** HTML pages are small (<700 KB each). No memory concerns.
+- **HTTP:** one `httpx.Client` reused for every request (connection reuse).

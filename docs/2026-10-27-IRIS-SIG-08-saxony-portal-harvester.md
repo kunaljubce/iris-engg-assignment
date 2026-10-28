@@ -13,7 +13,7 @@ idempotent upserts and full auditability.
 a few weeks and is demonstrated from a fresh database. Add something only if it serves the
 brief's acceptance criteria or makes the demo work. Leave out production hardening for a
 future the repo won't have (schema evolution over many migrations, multi-environment
-deployment, scale), and name it under "What We Are NOT Doing" so the omission is deliberate.
+deployment, scale), and name it under [What We Are NOT Doing](DESIGN.md#what-we-are-not-doing) so the omission is deliberate.
 
 **Branch:** `main`
 
@@ -21,56 +21,8 @@ deployment, scale), and name it under "What We Are NOT Doing" so the omission is
 
 ## Current State Analysis
 
-This is a greenfield repository. No existing code, schema, or configuration files.
-
-### Key Discoveries
-
-All verified against live pages on 2026-10-27 (fixtures in `tests/fixtures/`, provenance in
-`SOURCES.md`).
-
-1. **One portal, server-rendered, and everything needed is a plain GET.** Dresden and
-   Leipzig are both on the Saxon state portal (`buergerbeteiligung.sachsen.de`, PrimeFaces).
-   No browser automation is needed: `httpx` + BeautifulSoup.
-
-2. **The state portal embeds per-procedure coordinates.** Each listing contains an
-   OpenLayers call `map.drawMarkers([...])` whose JSON array has one entry per result, **across
-   all pages**: `id`, `kategorie` (the title, HTML-escaped), `href`, `latitude`, `longitude`
-   (WGS84), `adresse` (street address). All 83 markers captured have coordinates inside the city
-   bounding boxes. Geometry comes from the source, not from a lookup table.
-
-3. **EPSG zone mismatch.** Both cities are east of 12 deg E (Leipzig ~12.4, Dresden ~13.7), i.e.
-   outside the nominal coverage of EPSG:25832 (UTM 32N, 6--12 deg E); their native zone is
-   EPSG:25833. The brief mandates 25832, so points are transformed with PostGIS `ST_Transform`
-   and the zone note goes in the README. The bounding-box check catches gross errors.
-
-4. **The status filter is a GET parameter**: `&status=AKTUELLE` (the default view)
-   or `&status=BEENDETE` (finished). Uppercase only; lowercase is silently ignored. Cards render
-   10 per page behind a PrimeFaces AJAX paginator ("1 - 10 von 52"), but the marker JSON already
-   lists all 52, so the adapter reads the markers and never pages. The "von N" count, when
-   present, is a completeness check against the marker count.
-
-5. **IDs come from one shared sequence across cities**, so `source_record_id` is
-   unique on the portal. The detail URL must use the marker's `href`: a Dresden ID under
-   `/portal/leipzig/` silently redirects to the Leipzig listing (HTTP 200).
-
-6. **Publication date = start of the "Zeitraum".** There is no separate "published on" field.
-   The detail page's `li.nbp-statistik--laufzeit` ("Zeitraum 12.10.2026 bis 13.11.2026") is the
-   period in which the draft is publicly "veröffentlicht" (the detail text says so: "vom ... bis
-   ... veröffentlicht"; BauGB § 3 (2)). Its start date is the publication date.
-
-### Portal Details
-
-| Attribute | Saxon State Portal (Dresden + Leipzig) |
-|---|---|
-| Listing URL | `/portal/{city}/beteiligung/themen?format=Bauleitplan&status={AKTUELLE\|BEENDETE}` |
-| Framework | Jakarta Faces / PrimeFaces |
-| What is read | `map.drawMarkers([...])` JSON (all results, no paging) |
-| Pagination | Not needed (markers list every result) |
-| Detail URL | marker `href`: `/portal/{city}/beteiligung/themen/{id}` |
-| Stable ID | marker `id` (numeric) |
-| Coordinates | marker `latitude` / `longitude` (WGS84) |
-| Publication date | detail page `li.nbp-statistik--laufzeit`, start date |
-| Items (2026-10-27) | Dresden 8 current + 52 finished; Leipzig 2 current + 21 finished |
+Greenfield repository. What the live pages showed on 2026-10-27 is in
+[`docs/DESIGN.md`](DESIGN.md#key-discoveries) (Key Discoveries, Portal Details).
 
 ---
 
@@ -103,51 +55,7 @@ docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql
 
 ## What We Are NOT Doing
 
-- Browser automation (Playwright). Every page needed is a plain GET (Key Discoveries 1, 4).
-- Geocoding of any kind (Nominatim, Google, address lookup). The portal's markers supply coordinates; a marker without them is stored `unresolved` with the reason.
-- Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
-- Matching keywords in descriptions. The filter reads titles: plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for matches, for the publication date.
-- Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
-- Downloading or parsing PDF plan documents.
-- Building a web UI or API layer.
-- Handling BundID authentication (public pages only).
-- Production hardening (see the scope note in the Overview). For example, no SQLAlchemy `naming_convention`: it only pays off when later migrations alter or drop constraints by name, and this repo is expected to have the single migration `001`. Constraints and indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
-- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the `db`-marked tests run every query against it.
-- Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
-- Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
-- Storing non-industrial records. The objective is to *filter*; non-matches are only counted (`records_filtered_out`). `--dry-run` prints every record with its filter decision for tuning the keyword list.
-- Columns the brief doesn't ask for (plan type, plan number, procedure step, status, participation end date). They are kept as scraped in `raw_data`.
-- Secondary indexes. Under 1000 rows, PostgreSQL scans the table faster than it would use an index; only the unique index behind `uq_source_record` exists, because `ON CONFLICT` needs it.
-- Deleting rows that vanish from the portal or stop matching the filter. They stay, with an older `ingest_run_id` (validation check 9).
-
-
-## Configuration (settings.yml)
-
-
-## Coordinates and Bounding Box
-
-The markers supply the coordinates (`latitude` / `longitude`, WGS84). The pipeline sets `geocode_status` per record:
-
-| Case | `geocode_status` | `geometry` | `geocode_reason` |
-|---|---|---|---|
-| Marker coordinates parse as finite numbers and lie inside the city's bounding box | `source_coordinates` | EPSG:25832 point | NULL |
-| Marker coordinates missing or blank (either one) | `unresolved` | NULL | `marker has no coordinates` |
-| Coordinates non-numeric, non-finite or outside the box (e.g. lat/lon swapped) | `rejected_out_of_bounds` | NULL | e.g. `lon 51.05 outside dresden [13.55, 13.95]`, `lon 'abc' is not a number` |
-
-**Bounding box rejection:** coordinates are checked in WGS84 against the per-city box from
-`settings.yml` **before** they reach the database. Rejected rows are stored with
-`geometry = NULL` and the raw values in `raw_data`, never with the bad point. The check is
-written as "inside" (`min <= v <= max`), so NaN fails it too. `ck_geometry_matches_status`
-makes the database refuse a point without `source_coordinates`. Validation check 6 re-checks
-stored geometries in SQL.
-
-**Transform:** in SQL, `ST_Transform(ST_SetSRID(ST_MakePoint(lon, lat), 4326), 25832)` in the
-upsert. That keeps pyproj out of the dependencies; the database tests check a control point.
-
-**Note on EPSG:25832:** both cities are east of UTM zone 32N's nominal 12 deg E edge (Key
-Discovery 3). The CRS is still usable there, but scale distortion grows; documented in the
-README.
-
+See [`docs/DESIGN.md`](DESIGN.md#what-we-are-not-doing).
 
 ## Phase 1: Project Skeleton and Database ✅
 
@@ -161,40 +69,24 @@ DDL, no ORM models). This phase produces a working `docker compose up` +
 
 #### 1. `pyproject.toml` ✅
 
-`uv.lock` and `.python-version` (3.12) are committed, so every checkout resolves the same
-interpreter and package versions.
-
-**Sync throughout.** The harvester is a sequential, deliberately throttled
-crawler, so it uses:
-- a sync `httpx.Client`
-- a sync SQLAlchemy `Engine` / `Session` with psycopg 3
-- plain synchronous pytest tests (no `pytest-asyncio`)
+See [`docs/DESIGN.md`](DESIGN.md#implementation-approach) (Implementation Approach).
 
 #### 2. `docker-compose.yml` ✅
 
+See `docker-compose.yml`; the reasons for its settings are in the choices below.
+
 #### 3. `.env.example` ✅
 
-The repo commits no credential, not even a dev default. `.env` is already in `.gitignore`.
-
-**No hand-written connection URL.** `config.py` builds both URLs from the `POSTGRES_*` parts with `sqlalchemy.engine.URL.create()`, which does the encoding. Compose and the harvester read the same variables.
-
-The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(URL)` renders it as `***`, and the engine is built with `hide_parameters=True`.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#configuration-and-secrets) (Configuration and Secrets).
 
 #### 4. Alembic setup ✅
 
+See [`migrations/README.md`](../migrations/README.md).
+
 #### 5. `src/harvester/config.py` ✅
 
-- **Done:** `DatabaseSettings`, a pydantic-settings model reading `POSTGRES_HOST`, `_PORT`, `_USER`, `_PASSWORD` (`SecretStr`, required), `_DB` and `_TEST_DB` from the environment or `.env`. Its properties `url` and `test_url` return a `sqlalchemy.engine.URL`. It's covered by `tests/test_config.py`: a password with special characters survives the URL round trip, the password is masked in `str()`/`repr()`, and a missing password fails with a validation error.
-- **Done:** `load_config(path) -> HarvesterConfig`, which validates `config/settings.yml` with pydantic models, one per section. Only checks that stop a config mistake from silently producing wrong data (the "errors are visible" criterion) are included:
-  - `extra="forbid"`: a misspelt key (e.g. `keyowrds`) fails instead of leaving the filter empty and the run "succeeding" with zero matches
-  - no blank keywords: an empty one would match every title
-  - `status_filters` limited to `AKTUELLE` / `BEENDETE`: a typo would skip those plans
-  - bounding boxes: exactly 4 values, min below max (a swapped box rejects every point)
-  - a bounding box for every city a source covers (else a `KeyError` after the whole scrape)
-  - field types (e.g. a quoted `"2"` delay becomes `2.0`)
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#configuration-and-secrets) (Configuration and Secrets).
 
-  `HARVESTER_USER_AGENT` (environment or `.env`) overrides `scraping.user_agent`.
-  `config.model_dump(mode="json")` is what goes into `ingest_run.config_snapshot`. Covered by `tests/test_config.py`.
 - **Changed after the Phase 2 captures:** `scraping.headless` and `page_timeout_ms` removed (Playwright-only), `timeout_seconds: float` added.
 - `rows_per_page` is not in the config: the page size is a property of the portal, and the marker JSON lists every result anyway.
 
@@ -206,7 +98,7 @@ The password never reaches logs: it is a `SecretStr` (masked in `repr()`), `str(
 - **Why a separate `iris_test` database?** The db tests truncate and rewrite tables; they must never touch the data a demo run produced.
 - **Why no `DATABASE_URL` in `.env`?** It repeated the password and broke on `@ : / %` unless encoded by hand. `URL.create()` builds it from the `POSTGRES_*` parts compose already uses.
 - **How does the password stay out of logs?** `SecretStr` masks `repr()`, `str(URL)` shows `***`, and the engine uses `hide_parameters=True`.
-- **Why hand-written SQL migrations, no ORM / autogenerate?** There are no ORM models, so autogenerate has nothing to compare. The DDL in migration 001 is the single source of truth and reads like the schema in this plan.
+- **Why hand-written SQL migrations, no ORM / autogenerate?** There are no ORM models, so autogenerate has nothing to compare. The DDL in migration 001 is the single source of truth.
 - **Why one `op.execute()` per statement?** An error points at the failing statement.
 - **Why the Alembic version table in `iris_staging`?** A default `public.alembic_version` would collide with other Alembic projects in a shared database.
 - **Why does `downgrade()` keep the `postgis` extension and the schema?** A migration only removes what it alone created; other schemas may use PostGIS, and the schema holds Alembic's own table.
@@ -230,133 +122,35 @@ instances. Test with saved HTML fixtures (no live network).
 
 #### 1. `src/harvester/models.py` ✅
 
-Pydantic `ScrapedRecord` model (as specified above). Also `NormalisedRecord` with all
-fields that map to the DB schema.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#scrapedrecord-model) (ScrapedRecord Model).
 
 #### 2. `src/harvester/adapters/base.py` ✅
 
-```python
-from dataclasses import dataclass, field
-
-from harvester.models import ScrapedRecord
-
-
-@dataclass(frozen=True)
-class ScrapeError:
-    url: str
-    kind: str  # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
-    # | 'http_4xx' | 'retries_exhausted'
-    message: str
-    snippet: str | None = None  # marker JSON entry, truncated to 2 KB
-
-
-@dataclass
-class ScrapeResult:
-    records: list[ScrapedRecord] = field(default_factory=list)
-    errors: list[ScrapeError] = field(default_factory=list)
-```
-
-**No adapter base class.** The adapter is a module with one entry point,
-`scrape(client, source, settings) -> ScrapeResult`, which the runner calls directly.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#adapter-result-adaptersbasepy) (Adapter Result).
 
 #### 3. `src/harvester/adapters/fetch.py` ✅
 
-`fetch(client, url, settings) -> str` with the retry and status rules from **Resilience**. It
-raises `FetchError(kind, url, status, message)` when retries run out or on a non-retryable
-4xx; the adapter turns that into a `ScrapeError`.
-
-- `max_retries: 3` = 3 retries **after** the first attempt (at most 4 requests).
-- Waits: `request_delay_seconds` before the first attempt; `retry_backoff_factor ** n` before
-  retry n (2, 4, 8 s). A 429's `Retry-After` in seconds replaces that wait; the HTTP-date form
-  falls back to the backoff.
-- `make_client(settings, transport=None)` builds the one `httpx.Client` (user agent,
-  `timeout_seconds`, `follow_redirects=True`). The CLI and the test `mock_client` both use it,
-  passing a `MockTransport` in tests.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#fetch-adaptersfetchpy) (`fetch()`).
 
 #### 4. `src/harvester/adapters/sachsen_portal.py` ✅
 
-- `scrape(client, source: SachsenSource, settings) -> ScrapeResult`: one listing request per
-  city and status from the config, results merged. A listing that fails to fetch becomes a
-  `ScrapeError` (`http_4xx` / `retries_exhausted`); the other listings still run.
-- `parse_listing(html, page_url, city) -> tuple[list[ScrapedRecord], list[ScrapeError]]`:
-  markers plus the count check.
-- `parse_expected_count(html) -> int`
-- `parse_detail(html, record_id) -> str | None`: the raw "Zeitraum ..." text, only from the
-  record's own detail page.
-- `fetch_detail(client, record, settings) -> ScrapedRecord`: used by the pipeline for matches
-  only. It lets `FetchError` through; the pipeline turns it into `detail_page_failed`.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#saxon-state-portal-adapter-sachsen_portalpy) (Saxon State Portal Adapter).
 
 #### 5. Test fixtures ✅
 
-**One real page per markup the code parses**; every edge case is a minimal HTML snippet
-inside its test, so the test shows exactly what is wrong with the input. Captured 2026-10-27,
-**once, by hand** with `curl` (harvester user agent, 2 s apart), kept whole; provenance in
-`tests/fixtures/SOURCES.md`, which covers "source access ... must be verified". It also lists
-the pages checked but not kept (other cities and statuses use the same markup). The tests' reproducibility comes from the committed files,
-not from how they were downloaded.
+See [`docs/TESTS.md`](TESTS.md#fixtures) (Fixtures).
 
-- `sachsen_dresden_listing_beendet.html`: 52 markers (5 industrial, titles with `&quot;`),
-  10 cards, "von 52"
-- `sachsen_dresden_detail.html`: "Zeitraum 12.10.2026 bis 13.11.2026"
+#### 6. `tests/conftest.py` ✅
 
-Inline snippets: empty listing, cards without marker JSON, marker without `id`, swapped / empty
-/ non-numeric coordinates, "von 52" against 51 markers, and HTTP errors via `MockTransport`.
-
-#### 6. `tests/conftest.py` 
+See [`docs/TESTS.md`](TESTS.md#testsconftestpy).
 
 #### 7. `tests/test_sachsen_adapter.py` ✅
 
-```python
-def test_parses_markers():
-    """id, title, city-correct detail_url, lon/lat, address, raw_data from the fixture."""
+See [`docs/TESTS.md`](TESTS.md#teststest_sachsen_adapterpy) (`tests/test_sachsen_adapter.py`).
 
+#### 8. `tests/test_fetch.py` ✅
 
-def test_listing_has_all_results():
-    """52 markers although only 10 cards are rendered; matches 'von 52'."""
-
-
-def test_unescapes_title():
-    """Snippet: '&quot;Am Werk&quot;' -> '"Am Werk"'."""
-
-
-def test_count_mismatch_logged():
-    """Snippet: 'von 3' but 2 markers -> count_mismatch error, markers still returned."""
-
-
-def test_parses_zeitraum_from_detail():
-    """'Zeitraum 12.10.2026 bis 13.11.2026' from the detail fixture."""
-
-
-def test_redirect_to_listing_gives_no_zeitraum():
-    """The listing fixture has Zeitraum items in its cards; they must not be taken."""
-
-
-def test_other_records_detail_page_gives_no_zeitraum():
-    """Detail page of 1069133 read for record 1066719 -> None."""
-
-
-def test_handles_empty_listing():
-    """Snippet: no markers, no cards -> no records, no errors, no exception."""
-
-
-def test_cards_without_markers_is_an_error():
-    """Snippet: cards present but no marker JSON -> markers_not_found error."""
-
-
-def test_handles_malformed_markers():
-    """Snippet: marker without id, marker with blank title -> ScrapeErrors with snippet;
-    the others still parsed."""
-
-
-def test_scrape_reads_every_city_and_status():
-    """mock_client: one listing served, one 404 -> its records plus one http_4xx error."""
-
-
-def test_fetch_detail_adds_zeitraum(): ...
-def test_fetch_detail_failure_raises(): ...
-```
-
-#### 8. `tests/test_fetch.py` 
+See [`docs/TESTS.md`](TESTS.md).
 
 ### Choices You May Be Asked About
 
@@ -407,32 +201,19 @@ detail page of each match, parse the date, check the coordinates.
 
 #### 1. `src/harvester/pipeline/filter.py` ✅
 
-Industrial keyword filter as specified above. `IndustrialFilter(config.industrial_filter)`
-takes the validated config section directly.
+See [`docs/DESIGN.md`](DESIGN.md#industrial-keyword-filter) (Industrial Keyword Filter).
 
 #### 2. `src/harvester/pipeline/geocode.py` ✅
 
-- `check_coordinates(lon, lat, city, bbox) -> GeocodeResult` (a NamedTuple of `lon, lat,
-  status, reason`) following the table in **Coordinates and Bounding Box**. Pure Python; the
-  transform happens in the upsert SQL.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#coordinates-and-bounding-box) (Coordinates and Bounding Box).
 
 #### 3. `src/harvester/pipeline/normalise.py` ✅
 
-- `normalise(scraped, client, config) -> NormaliseResult(records, filtered_out)`. It takes the
-  HTTP client because only matches get their detail page fetched.
-- Order per record: filter -> (match only) `fetch_detail` -> parse date -> check
-  coordinates -> `NormalisedRecord`. Non-matches are dropped and counted as
-  `records_filtered_out`.
-- Publication date: the first `DD.MM.YYYY` in the "Zeitraum" text to `datetime.date`,
-  following **Publication Dates**. Unparseable text becomes NULL plus `unparseable_date`.
-- Quality flags: `missing_publication_date`, `missing_location`, `unparseable_date`,
-  `detail_page_failed`. A failed detail page also gets `missing_publication_date` (the date is
-  missing; the other flag says why). `missing_location` means neither a point nor a
-  `location_text`.
-- `raw_data` gains `filter_evidence`, `zeitraum` (raw text) and,
-  if the detail page failed, `detail_error`.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#pipeline) (Pipeline).
 
-#### 4. Tests
+#### 4. Tests ✅
+
+See [`docs/TESTS.md`](TESTS.md).
 
 ### Choices You May Be Asked About
 
@@ -442,7 +223,7 @@ Decided in this plan; confirm or update each one as the step is built.
   request: on the Dresden fixture 5 of 52 records, instead of all 52. (Step 1, built)
 - **What does the filter miss?** Plans whose title says nothing industrial (Nr. 422
   Radefelder Allee West). Reading descriptions would catch them but adds false positives; see
-  "What We Are NOT Doing". (Step 1, checked on the fixtures)
+  [What We Are NOT Doing](DESIGN.md#what-we-are-not-doing). (Step 1, checked on the fixtures)
 - **Why do some rows list both "Gewerbegebiet" and "Gewerbe"?** Long keywords match inside words,
   so the general one hits too. Which rows are stored only depends on whether anything matched.
   (Step 1, built)
@@ -465,7 +246,7 @@ Decided in this plan; confirm or update each one as the step is built.
   in `raw_data`. (Step 2, built)
 - **Why no geocoding of addresses?** The brief asks for points "where the source provides
   sufficient information", and the markers carry coordinates. An external geocoder adds a
-  dependency and its own errors; see "What We Are NOT Doing". (Step 2)
+  dependency and its own errors; see [What We Are NOT Doing](DESIGN.md#what-we-are-not-doing). (Step 2)
 - **Why check the bounding box in Python, before the database?** A bad point is never written;
   the row is stored with `geometry = NULL`, `rejected_out_of_bounds` and the reason.
 - **Why is the check written as "inside" (`min <= v <= max`)?** NaN fails every comparison, so
@@ -486,48 +267,23 @@ and integration tests including idempotent re-run and duplicate detection.
 
 #### 1. `src/harvester/db/engine.py` + db test fixtures ✅
 
-- `make_engine(url=None)`: sync SQLAlchemy `Engine` (psycopg 3), the harvester database by
-  default, `hide_parameters=True`. `load_database_settings()` turns a missing
-  `POSTGRES_PASSWORD` into `DatabaseConfigError` naming the variable.
-- `migrations/env.py` accepts a connection in `config.attributes["connection"]` (the standard
-  Alembic hook), so the tests migrate `iris_test` without touching `iris`.
-- `conftest.py`: a session fixture migrates `iris_test` to head (skips if the settings are
-  missing, fails if they're present but the database is unreachable); `db_engine` empties
-  both tables before each test. `--dry-run` never creates an engine.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#database-runner-and-cli) (Database, Runner and CLI). The db test fixtures: [`docs/TESTS.md`](TESTS.md#test-infrastructure).
 
 #### 2. `src/harvester/db/upsert.py` ✅
 
-- `upsert_records(conn, records, run_id) -> UpsertStats(inserted, updated, duplicates)`, on
-  the caller's connection and transaction; `text()` statements, no ORM.
-- Implements **Upsert Logic**: drop repeated keys (last kept, each one a `duplicate_in_batch`
-  error), then one `INSERT ... ON CONFLICT ON CONSTRAINT uq_source_record DO UPDATE ...
-  RETURNING (xmax = 0)` per record. `ST_Transform` to EPSG:25832 in the statement.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#database-runner-and-cli) (Database, Runner and CLI). The upsert itself: [Upsert Logic](DESIGN.md#upsert-logic).
 
 #### 3. `src/harvester/runner.py` ✅
 
-- `scrape_and_normalise(client, source, config)`: the network half, no database (used by
-  `--dry-run`).
-- `run_source(engine, client, source, config) -> RunSummary`: never raises.
-  1. Commit the `ingest_run` row as `running` (with `config_snapshot`).
-  2. Scrape + normalise.
-  3. In one transaction: upsert, then write the run's counts, errors and final status.
-  4. On any exception that transaction rolls back and the run is marked `failed` with
-     `error_message`.
-- One `ingest_run` per invocation. `city` is set when the run covers one city (`--city`),
-  NULL when it covers both.
-- `records_rejected` counts the record-level errors (`missing_id`, `missing_title`);
-  page-level ones are only in `errors`.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#database-runner-and-cli) (Database, Runner and CLI).
 
 #### 4. `src/harvester/cli.py` (+ `__main__.py`) ✅
 
-- `harvester run [--dry-run] [--source NAME] [--city SLUG]` (also `python -m harvester run`).
-  An unknown source or city is a usage error, not an empty run.
-- `--dry-run` prints every scraped record (KEEP with keywords, date, geocode, flags, or `-`)
-  and the scrape errors; it needs no database.
-- A normal run prints one summary line and exits 1 if the run failed.
-- `harvester report` came with the report itself in Phase 5.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#database-runner-and-cli) (Database, Runner and CLI).
 
-#### 5. Tests 
+#### 5. Tests ✅
+
+See [`docs/TESTS.md`](TESTS.md).
 
 ### Choices You May Be Asked About
 
@@ -587,45 +343,7 @@ completes all deliverables.
 
 #### 1. `src/harvester/report.py` + `harvester report` ✅
 
-`harvester report` (also `python -m harvester report`) prints four aligned tables, from
-the database only:
-
-- **Latest runs**, one row per source (`DISTINCT ON (source) … ORDER BY started_at
-  DESC`): city (`all` when the run covered all the source's cities), status, start in
-  UTC, scraped, industrial, rejected, inserted, updated, errors.
-- **Run errors** of those runs: count per error kind with its first message as an
-  example, plus a failed run's message as kind `run_failed`. The full list stays in
-  `ingest_run.errors`.
-- **Stored records** per source and city: records, with point, `unresolved`, and
-  `rejected_out_of_bounds` ("rejected bbox"). This covers all rows, i.e. what a consumer
-  of `signal_ingest` sees, not only the latest run's.
-- **Quality flags** per source and city.
-
-Aggregates only, each serving the acceptance criterion "errors and missing fields are
-visible; invalid coordinates are not silently accepted". No notes next to the numbers:
-the column names are the field names, and the README explains them once. Row-level
-checks (e.g. filter evidence per record) belong in `sql/validation_queries.sql`.
-
-Live output on 2026-10-28:
-
-```
-IRIS-SIG-08 quality report
-
-Latest runs
-  source          city  status     started (UTC)     scraped  industrial  rejected  inserted  updated  errors
-  sachsen_portal  all   completed  2026-10-28 09:44       83           9         0         9        0       0
-
-Run errors
-  none
-
-Stored records
-  source          city     records  with point  unresolved  rejected bbox
-  sachsen_portal  dresden        7           7           0              0
-  sachsen_portal  leipzig        2           2           0              0
-
-Quality flags
-  none
-```
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#quality-report) (Quality Report). The live output is in the README.
 
 Built differently from the first draft of this plan:
 - One block per **source**, not per run and city ("sachsen_portal (dresden)"): since
@@ -640,24 +358,7 @@ Built differently from the first draft of this plan:
 
 #### 2. `sql/validation_queries.sql` ✅
 
-9 checks, each headed by an `\echo` so the output of
-`docker compose exec -T db psql -U iris -d iris -f - < sql/validation_queries.sql` is
-readable. Checks marked "expect 0 rows" are violations when they return anything.
-
-| # | Check | Criterion it serves |
-|---|---|---|
-| 1 | Latest run per source: status and counts | errors visible |
-| 2 | Run errors by kind, from `ingest_run.errors` | errors visible |
-| 3 | Records by source, city, geocode status, with point / date | missing fields visible |
-| 4 | Quality flag counts | missing fields visible |
-| 5 | Records without a point, with `geocode_reason` | missing fields visible |
-| 6 | Points outside the bounding box of the run that wrote them (expect 0) | invalid coordinates not silently accepted |
-| 7 | Points in EPSG:25832 and back in WGS84 | valid staging records |
-| 8 | Each record with its run, source URL and filter evidence | traceable records; filtering |
-| 9 | Stale records: not written by the latest completed run covering their city | traceable records |
-
-Live results on 2026-10-28: the "expect 0" checks return 0 rows. Check 6 was also tested by moving one point to Berlin inside a
-rolled-back transaction: it returned that row.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#validation-queries) (Validation Queries).
 
 Built differently from the first draft of this plan:
 - Check 6 reads each city's box from the `config_snapshot` of the run that wrote the row,
@@ -675,15 +376,7 @@ Built differently from the first draft of this plan:
 
 #### 3. `sample_output/signal_ingest_sample.csv` ✅
 
-All 9 records from the live run on 2026-10-28, every column of `signal_ingest`. The
-geometry is written as `x_25832` / `y_25832` (as stored) and `lon` / `lat` (WGS84), and
-`raw_data` as JSON, so the sample also shows traceability and the filter evidence.
-
-Made with one `COPY (SELECT …) TO STDOUT WITH (FORMAT csv, HEADER)` through
-`docker compose exec`; the README has the command to regenerate it.
-
-"Anonymized or public-source": the data is public-source. `raw_data` keeps only what the
-portal publishes (marker, Zeitraum, listing URL, filter evidence); a search for e-mail, phone and contact patterns found nothing to anonymize.
+See [`docs/IMPLEMENTATION.md`](IMPLEMENTATION.md#sample-output) (Sample Output).
 
 Built differently from the first draft of this plan:
 - No GeoJSON: the brief asks for sample output, and a second format of the same rows
@@ -716,7 +409,9 @@ Built differently from the first draft of this plan:
   them.
 - No test count in the README; it would go stale with every test added.
 
-#### 5. Tests
+#### 5. Tests ✅
+
+See [`docs/TESTS.md`](TESTS.md).
 
 ### Choices You May Be Asked About
 
@@ -762,20 +457,6 @@ Decided in this plan; confirm or update each one as the step is built.
   cases are shown by the tests (marker without coordinates, out-of-bounds marker, detail
   page 404, unreachable portal), including the quality report's.
 
-
----
-
-
-## Performance Considerations
-
-- **Request volume (2026-10-27):** 4 listings (2 cities x 2 statuses) + one detail page
-  per match (~9) = ~13 requests, under a minute at a 2 s delay. The
-  live run is quick enough to demo; re-run and idempotency demos also work against fixtures.
-- **Database:** Small table (<1000 rows, only industrial matches). No indexes beyond the
-  primary key and `uq_source_record`; see **Database Schema**.
-- **Memory:** HTML pages are small (<700 KB each). No memory concerns.
-- **HTTP:** one `httpx.Client` reused for every request (connection reuse).
-
 ---
 
 ## Migration Notes
@@ -800,7 +481,7 @@ Not required for acceptance. Pick up only once Phases 1-5 are done.
   `make` ships with macOS and most Linux systems; `just` reads better but is an extra
   install. Either way, don't hide steps the README doesn't also list.
 - **Scripted fixture capture** (`scripts/capture_fixtures.py`). Only worth it if fixtures
-  have to be refreshed regularly; they are captured once, by hand (see Phase 2).
+  have to be refreshed regularly; they are captured once, by hand (see [Fixtures](TESTS.md#fixtures)).
 - **Stricter config validation.** Parked because each check guards against an unlikely
   mistake rather than an acceptance criterion: `https://` pattern on `base_url`, value ranges
   (delay >= 0, `retry_backoff_factor` >= 1, timeout > 0, lat/lon within -90..90 / -180..180),
