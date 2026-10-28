@@ -486,16 +486,7 @@ not from how they were downloaded.
 Inline snippets: empty listing, cards without marker JSON, marker without `id`, swapped / empty
 / non-numeric coordinates, "von 52" against 51 markers, and HTTP errors via `MockTransport`.
 
-#### 6. `tests/conftest.py` ✅ (DB fixtures follow in Phase 4)
-
-- `tests/__init__.py` makes `tests` a package, so test modules import `load_fixture` and
-  `MockClient` from `tests.conftest` and mypy sees one module, not two
-- `load_fixture(name) -> str`
-- `mock_client(routes: dict[str, str | int])`: `make_client()` with an `httpx.MockTransport`
-  that serves fixture text (or a status code) per URL and **fails the test on any unrouted
-  URL**, so tests can never reach the live portal. No extra dependency (MockTransport is part
-  of httpx).
-- `scraping_config` fixture: no polite delay and no retries, so adapter tests run instantly.
+#### 6. `tests/conftest.py` 
 
 #### 7. `tests/test_sachsen_adapter.py` ✅
 
@@ -549,15 +540,7 @@ def test_fetch_detail_adds_zeitraum(): ...
 def test_fetch_detail_failure_raises(): ...
 ```
 
-#### 8. `tests/test_fetch.py` ✅
-
-```python
-def test_retries_on_503_then_succeeds(): ...
-def test_retries_on_timeout(): ...
-def test_honours_retry_after_on_429(): ...
-def test_no_retry_on_404(): ...
-def test_raises_fetch_error_when_retries_exhausted(): ...
-```
+#### 8. `tests/test_fetch.py` 
 
 ### Choices You May Be Asked About
 
@@ -646,24 +629,6 @@ def test_raises_fetch_error_when_retries_exhausted(): ...
 - **How do the tests avoid real sleeps?** They replace `time.sleep` in `fetch.py` with a list
   recorder: tests run instantly and can assert the exact waits (e.g. `Retry-After: 5` -> 5 s).
 
-### Success Criteria
-
-#### Automated Verification
-- [x] `pytest tests/test_sachsen_adapter.py tests/test_fetch.py` -- all pass
-- [x] `ruff check src/harvester/adapters/` passes
-- [x] `mypy src/harvester/adapters/ src/harvester/models.py` passes
-
-#### Manual Verification
-- [x] Fixture HTML files are whole, unedited captures of the live portal (2026-10-27)
-- [x] `tests/fixtures/SOURCES.md` lists every fixture and the pages checked but not kept
-- [x] Status-filter mechanism, publication-date element and ID scope confirmed (Key Discoveries 4-6)
-- [x] `ScrapedRecord` fields match expectations for each fixture (checked by hand against the pages, 2026-10-28)
-- [x] Live smoke run of `scrape()` (2026-10-28): 83 records (Dresden 60, Leipzig 23), no
-      errors; a live Leipzig detail page gave its Zeitraum (body-class check holds for
-      Leipzig too)
-
-**Checkpoint:** Pause for confirmation before proceeding to Phase 3.
-
 ---
 
 ## Phase 3: Pipeline (Filter, Detail Dates, Geocode, Normalise) ✅
@@ -704,34 +669,6 @@ takes the validated config section directly.
 
 #### 4. Tests
 
-```python
-# tests/test_filter.py
-def test_matches_gewerbegebiet_in_title():
-def test_matches_compounds():  # Gewerbestandort, Kleingewerbe, Logistikzentrum, Industriepark
-def test_evidence_contains_full_compound_word():
-def test_matches_GE_case_sensitive():
-def test_no_false_positive_on_lowercase_ge():  # "gegen" should not match
-def test_short_codes_not_matched_inside_words():  # "GIESSEN", "GEMEINDE" -> no match
-def test_no_match_returns_false():
-def test_keywords_from_config():
-
-# tests/test_geocode.py
-def test_in_bounds_is_source_coordinates():
-def test_missing_coordinates_unresolved():
-def test_rejects_out_of_bounds():
-def test_rejects_swapped_lat_lon():
-def test_rejects_non_numeric_and_non_finite():  # "abc", "13,76", NaN, inf
-
-# tests/test_normalise.py
-def test_publication_date_is_zeitraum_start():
-def test_unparseable_date_flagged_not_raised():
-def test_marker_without_coordinates_or_address_is_unresolved():  # missing_location
-def test_detail_fetched_only_for_matches():      # mock client sees no request for non-matches
-def test_detail_page_404_flagged():               # detail_page_failed, listing data kept
-def test_out_of_bounds_marker_is_rejected():      # swapped lat/lon end to end
-def test_non_industrial_records_dropped_and_counted():
-```
-
 ### Choices You May Be Asked About
 
 Decided in this plan; confirm or update each one as the step is built.
@@ -770,21 +707,6 @@ Decided in this plan; confirm or update each one as the step is built.
   it's rejected too.
 - **Why is `publication_date` the start of "Zeitraum"?** That's the first day the plan is
   publicly available (BauGB § 3 (2)); the raw text stays in `raw_data`.
-
-### Success Criteria
-
-#### Automated Verification
-- [x] `pytest tests/test_normalise.py tests/test_filter.py tests/test_geocode.py` -- all pass
-- [x] `ruff check src/harvester/pipeline/` passes
-- [x] `mypy src/harvester/pipeline/` passes
-
-#### Manual Verification
-- [x] Filter decisions on the fixtures look right (no obvious misses or false hits). Checked
-  with a script, since `--dry-run` arrives in Phase 4: Dresden 5 of 52
-- [x] Live run of scrape + normalise (2026-10-28): 83 scraped, 9 kept (7 Dresden, 2 Leipzig),
-  all with a detail-page date and `source_coordinates`, no flags, no errors
-
-**Checkpoint:** Pause for confirmation before proceeding to Phase 4.
 
 ---
 
@@ -840,34 +762,7 @@ and integration tests including idempotent re-run and duplicate detection.
 - A normal run prints one summary line and exits 1 if the run failed.
 - `harvester report` came with the report itself in Phase 5.
 
-#### 5. Tests ✅
-
-```python
-# tests/test_upsert.py  (db)
-def test_insert_new_records():
-def test_rerun_creates_no_duplicates():        # 0 inserted, N updated; ids, created_at unchanged
-def test_rerun_overwrites_changed_content():   # same id, new title, new ingest_run_id
-def test_duplicate_keys_in_one_batch():        # one row (the last), duplicate_in_batch
-def test_filter_config_change_updates_keywords():
-def test_same_id_from_two_sources_is_two_rows():
-
-# tests/test_bounding_box.py  (db)
-def test_out_of_bounds_stored_with_null_geometry():
-def test_in_bounds_stored_with_geometry():      # SRID 25832
-def test_transform_control_point():             # Frauenkirche, pyproj value, 1 m tolerance
-
-# tests/test_pipeline_integration.py  (db, mocked portal)
-def test_full_pipeline_fixture_to_db():         # 52 -> 5, dates, flags, traced run
-def test_full_pipeline_twice_is_idempotent():   # (0, 5); same ids
-def test_errors_visible_in_ingest_run():        # missing_title in errors, records_rejected
-def test_unreachable_source_is_a_failed_run():  # 503 -> failed, error_message
-def test_crash_rolls_back_records_and_fails_run():
-
-# tests/test_cli.py
-def test_select_by_city_narrows_state_portal():
-def test_unknown_source_or_city_is_an_error():
-def test_dry_run_prints_decisions_without_database():
-```
+#### 5. Tests 
 
 ### Choices You May Be Asked About
 
@@ -913,23 +808,6 @@ Decided in this plan; confirm or update each one as the step is built.
   built)
 - **Why are rows never deleted?** A plan missing from one run may just be a portal hiccup;
   staging keeps what was seen, with `updated_at` as "last seen".
-
-### Success Criteria
-
-#### Automated Verification
-- [x] `pytest tests/test_upsert.py tests/test_bounding_box.py tests/test_pipeline_integration.py` -- all pass
-- [x] `python -m harvester run --dry-run` executes without error (mocked portal, `test_cli.py`)
-- [x] `ruff check .` passes
-- [x] `mypy .` passes
-
-#### Manual Verification (live, 2026-10-28)
-- [x] `python -m harvester run` against the live portal populates the DB: 83 scraped, 9
-  inserted (7 Dresden, 2 Leipzig, all with point and date)
-- [x] `SELECT count(*) FROM iris_staging.signal_ingest` shows 9
-- [x] Re-run produces 0 inserts (9 updated) and the same row count
-- [x] No `count_mismatch` errors (0 errors in both runs)
-
-**Checkpoint:** Pause for confirmation before proceeding to Phase 5.
 
 ---
 
@@ -1073,19 +951,7 @@ Built differently from the first draft of this plan:
   them.
 - No test count in the README; it would go stale with every test added.
 
-#### 5. Tests ✅ (report)
-
-`tests/test_quality_report.py`, 3 db tests:
-- the latest run per source is shown (not an older one) with its UTC start and counts;
-  stored records by city with point and geocode counts, and flag counts
-- a failed run shows its failure as `run_failed` and its errors counted by kind, with an
-  example message
-- an empty database prints every section with "no runs yet" / "none" instead of failing
-
-Rows are compared with whitespace collapsed, so the tests don't depend on column widths.
-
-The tests set `started_at` explicitly: `NOW()` is the transaction start, so every run
-made in one test transaction would otherwise have the same time.
+#### 5. Tests
 
 ### Choices You May Be Asked About
 
@@ -1131,59 +997,9 @@ Decided in this plan; confirm or update each one as the step is built.
   cases are shown by the tests (marker without coordinates, out-of-bounds marker, detail
   page 404, unreachable portal), including the quality report's.
 
-### Success Criteria
-
-#### Automated Verification
-- [x] `pytest` -- full suite passes (81 tests)
-- [x] `ruff check .` passes
-- [x] `mypy .` passes
-- [x] `python -m harvester report` generates report without error (live, 2026-10-28)
-
-#### Manual Verification
-- [ ] README instructions produce a working setup from scratch
-- [x] `sql/validation_queries.sql` runs against populated DB and returns sensible results
-  (live, 2026-10-28)
-- [x] Sample CSV parses with every row and column (9 rows, 2026-10-28)
-- [ ] Quality report identifies any data issues
-
-**Checkpoint:** Final review.
 
 ---
 
-## Testing Strategy
-
-### Unit Tests
-- Adapter HTML parsing (from fixtures, no network)
-- `fetch()` retry rules (httpx `MockTransport`)
-- Normalisation functions (publication date parsing, quality flags, dropping non-matches)
-- Industrial keyword filter (positive matches, negative matches, case sensitivity)
-- Coordinate check (in bounds, missing, out of bounds, swapped, non-numeric)
-
-### Integration Tests
-- Full pipeline: fixture HTML -> adapter -> normalise -> filter -> geocode -> upsert -> DB query
-- Idempotent re-run: same fixtures upserted twice, verify 0 new rows and stable ids
-- Content change: modify fixture, verify the existing row is rewritten in place
-- Out-of-bounds coordinates: verify NULL geometry + rejection status stored
-- `ST_Transform` control point: WGS84 in, expected EPSG:25832 out
-
-### Test Infrastructure
-- **HTTP:** no browser. Parsing tests call the pure `parse_*` functions on fixture text;
-  `scrape()` and pipeline tests use the `mock_client` from `conftest.py` (httpx
-  `MockTransport`), which **fails on any URL not mapped to a fixture**, so tests can never reach
-  the live portal.
-- **Database:** the PostGIS `iris_test` database from `docker compose`, at
-  `DatabaseSettings().test_url`. There is **no SQLite/SpatiaLite fallback**: the upsert depends on
-  PostgreSQL-only features (`ON CONFLICT`, `xmax`, `ST_Transform`, `TEXT[]`), so a
-  different engine would test different behaviour.
-  - A session-scoped fixture runs `alembic upgrade head` against `iris_test`.
-  - Each test starts by emptying both tables (`TRUNCATE`). Not a rolled-back transaction:
-    `run_source` commits the run row and the upsert separately on purpose, so a test can't
-    hold them in one outer transaction.
-  - Tests marked `db` are **skipped with an explicit reason** if the database settings can't
-    be loaded (no `POSTGRES_PASSWORD` in the environment or `.env`). If they load but the
-    database is unreachable, the tests **fail**: configured-but-broken is an error, not a skip. The non-DB suite (parsing, filter, normalise, geocode, fetch) runs with no Docker.
-
----
 
 ## Performance Considerations
 

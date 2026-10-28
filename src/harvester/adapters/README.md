@@ -28,6 +28,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+
 class ScrapedRecord(BaseModel):
     source: str  # 'sachsen_portal'
     source_record_id: str  # stable ID from the source
