@@ -85,7 +85,7 @@ Plan titles are usually German compounds ("Gewerbestandort Nord", "Logistikzentr
 
 Implemented as `IndustrialFilter` in [`src/harvester/pipeline/filter.py`](../src/harvester/pipeline/filter.py). Its `check(title)` returns a `FilterResult` with `is_industrial`, `matched_keywords` (as written in the config) and `evidence` (the matched words, e.g. "Gewerbestandort").
 
-`evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
+`evidence` goes into `raw_data` and is listed per record by validation check 8, so false positives (e.g. "Wohn- und Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
 
 The filter runs on listing data, **before** any detail page is fetched, so only matches cost an extra request. Only records with `is_industrial = True` are stored; `matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its filter decision, so false negatives can be checked while tuning the keyword list.
 
@@ -103,8 +103,6 @@ The filter runs on listing data, **before** any detail page is fetched, so only 
 - Paging through the state portal's AJAX card paginator: the marker JSON lists every result.
 - Matching keywords in descriptions. The filter reads titles: plan titles name the area type, and descriptions mention "Gewerbe" in passing (neighbouring uses, "Gewerbesteuer"), which would add false positives. Detail pages are then fetched only for matches, for the publication date.
 - Scraping surrounding districts (Meissen, Nordsachsen, Leipzig-Land, etc.).
-- Production hardening (see the scope note in the [plan's Overview](2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md#overview)). For example, no SQLAlchemy `naming_convention`: it only pays off when later migrations alter or drop constraints by name, and this repo is expected to have the single migration `001`. Constraints and indexes the code refers to (e.g. `uq_source_record` for `ON CONFLICT`) are named explicitly.
-- ORM models (`schema.py`, GeoAlchemy2). Two tables and one migration don't justify a second copy of the schema: the SQL DDL in migration `001` is the single source of truth, and the `db`-marked tests run every query against it.
 - Incremental retrieval (skipping unchanged detail pages). The brief asks for idempotent re-runs, not fast ones, and a full live run is ~13 requests (under a minute).
 - Change detection (`content_hash`, `last_seen_*` columns, an "unchanged" counter). The brief asks for no duplicates on re-run, which the unique key plus `ON CONFLICT` guarantees on its own. Nothing consumes "what changed", so existing rows are simply rewritten.
 - Columns the brief doesn't ask for (plan type, plan number, procedure step, status, participation end date). They are kept as scraped in `raw_data`.
