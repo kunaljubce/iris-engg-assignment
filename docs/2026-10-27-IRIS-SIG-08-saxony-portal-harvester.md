@@ -270,136 +270,6 @@ bounding_boxes:
 
 
 
-### Upsert Logic
-
-Idempotency comes from the natural key: `uq_source_record UNIQUE (source, source_record_id)`
-plus `INSERT ... ON CONFLICT DO UPDATE`. Re-running over the same data cannot add rows. There
-is **no change detection**: an existing row is always rewritten with the latest values. Nothing
-in the brief consumes "what changed", so telling a real change apart from a re-scrape isn't
-worth a hash column and its tests (see "What We Are NOT Doing").
-
-**Step 0: de-duplicate the batch in Python.** Records are written one statement each, so a
-repeated key would not fail, but it would be written twice and counted as 1 inserted + 1
-updated for a single row, and the repeat (a source problem) would go unseen.
-Records with a repeated `(source, source_record_id)` in one batch (e.g. a procedure that moves
-from `AKTUELLE` to `BEENDETE` between the two listing requests) are collapsed to the last occurrence. Each one
-dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
-
-**Step 1: insert or overwrite.**
-
-```sql
-INSERT INTO iris_staging.signal_ingest (
-    source, source_record_id, ingest_run_id,
-    city, title, detail_url, location_text,
-    publication_date, matched_keywords,
-    geometry, geocode_status, geocode_reason, quality_flags, raw_data
-)
-VALUES (
-    ...,
-    -- WGS84 -> EPSG:25832 in PostGIS (no pyproj). NULL lon/lat (unresolved or rejected)
-    -- gives a NULL geometry; the bounding box was checked in Python before this
-    ST_Transform(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), 25832),
-    ...
-)
-ON CONFLICT (source, source_record_id) DO UPDATE SET
-    ingest_run_id    = EXCLUDED.ingest_run_id,
-    city             = EXCLUDED.city,
-    title            = EXCLUDED.title,
-    detail_url       = EXCLUDED.detail_url,
-    location_text    = EXCLUDED.location_text,
-    publication_date = EXCLUDED.publication_date,
-    matched_keywords = EXCLUDED.matched_keywords,
-    geometry         = EXCLUDED.geometry,
-    geocode_status   = EXCLUDED.geocode_status,
-    geocode_reason   = EXCLUDED.geocode_reason,
-    quality_flags    = EXCLUDED.quality_flags,
-    raw_data         = EXCLUDED.raw_data,
-    updated_at       = NOW()
-RETURNING (xmax = 0) AS inserted;
-```
-
-**Counting:** `inserted` = rows returned with `inserted = true`; `updated` = the rest. A
-re-run over unchanged data therefore reports 0 inserted and N updated, with the row count
-and every `id` and `created_at` unchanged.
-
-`xmax = 0` is the standard PostgreSQL test for whether a row from an `ON CONFLICT` upsert
-was newly inserted. It's covered by a test.
-
-**How it's executed:** the statement is a SQLAlchemy `text()` with named parameters, run
-with one parameter dict per record (no ORM models; see Phase 1). psycopg 3 adapts Python
-lists to `TEXT[]`. Dicts for `JSONB` must be wrapped in `psycopg.types.json.Jsonb(...)`, or
-binding fails. Records are executed one statement each, in a loop inside the batch's single
-transaction, collecting each `RETURNING` row. That's simple, keeps the per-record counting
-obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one
-`executemany` call isn't something to rely on with `text()`.
-
-**Rows are never deleted.** A plan that disappears from the portal, or stops matching after the
-keyword list changes, keeps its row; its `ingest_run_id` then points at an older run than the
-latest one covering its city (validation check 9 lists these).
-
----
-
-## Industrial Keyword Filter
-
-Plan titles are usually German compounds ("Gewerbestandort Nord", "Logistikzentrum
-Radefeld", "Kleingewerbe am Bahnhof"), so whole-word matching misses most real hits.
-The filter uses two kinds of match:
-
-- **Long keywords** (Gewerbe, Industrie, Logistik, ...) match case-insensitively **anywhere
-  inside a word**. The whole word containing the hit is kept as evidence.
-- **Short codes** (GE, GI, GVZ) match **case-sensitively as whole tokens only**. As
-  substrings they would hit ordinary words ("gegen", "Gießen").
-
-```python
-import re
-from dataclasses import dataclass, field
-
-from harvester.config import IndustrialFilterConfig
-
-
-@dataclass(frozen=True)
-class FilterResult:
-    is_industrial: bool
-    matched_keywords: list[str] = field(default_factory=list)  # keywords as written in config
-    evidence: list[str] = field(default_factory=list)  # matched words, e.g. "Gewerbestandort"
-
-
-class IndustrialFilter:
-    def __init__(self, config: IndustrialFilterConfig) -> None:
-        # \w* on both sides captures the whole compound word around the keyword as evidence
-        self._patterns = [
-            *((kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in config.keywords),
-            *((tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in config.case_sensitive_tokens),
-        ]
-
-    def check(self, title: str) -> FilterResult:
-        keywords: list[str] = []
-        evidence: list[str] = []
-        for keyword, pattern in self._patterns:
-            hits = pattern.findall(title)
-            if hits:
-                keywords.append(keyword)
-                evidence.extend(hits)
-
-        unique = list(dict.fromkeys(keywords))
-        return FilterResult(
-            is_industrial=bool(unique),
-            matched_keywords=unique,
-            evidence=list(dict.fromkeys(evidence)),
-        )
-```
-
-`evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und
-Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
-
-Only the title is read; see "What We Are NOT Doing" for why not
-descriptions. The filter runs on listing data, **before** any detail page is fetched, so only
-matches cost an extra request. Only records with `is_industrial = True` are stored;
-`matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and
-`--dry-run` prints every record with its filter decision, so false negatives can be checked
-while tuning the keyword list.
-
----
 
 ## Coordinates and Bounding Box
 
@@ -474,17 +344,18 @@ from typing import Any
 
 from pydantic import BaseModel
 
+
 class ScrapedRecord(BaseModel):
-    source: str                     # 'sachsen_portal'
-    source_record_id: str           # stable ID from the source
-    city: str                       # 'dresden' | 'leipzig'
+    source: str  # 'sachsen_portal'
+    source_record_id: str  # stable ID from the source
+    city: str  # 'dresden' | 'leipzig'
     title: str
     detail_url: str
     location_text: str | None = None
     lon: float | str | None = None  # as given by the source; checked in the pipeline
     lat: float | str | None = None
-    zeitraum: str | None = None     # raw "Zeitraum ..." text from the detail page
-    raw_data: dict[str, Any]        # all scraped fields as-is
+    zeitraum: str | None = None  # raw "Zeitraum ..." text from the detail page
+    raw_data: dict[str, Any]  # all scraped fields as-is
 ```
 
 ---
@@ -553,62 +424,6 @@ DDL, no ORM models). This phase produces a working `docker compose up` +
 
 #### 1. `pyproject.toml` ✅
 
-```toml
-[project]
-name = "iris-sig-08-harvester"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "httpx>=0.27",
-    "beautifulsoup4>=4.12",
-    "sqlalchemy>=2.0",
-    "alembic>=1.13",
-    "psycopg[binary]>=3.1",
-    "pydantic>=2.5",
-    "pydantic-settings>=2.1",
-    "pyyaml>=6.0",
-    "click>=8.1",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.7",
-    "mypy>=1.13",
-    "types-PyYAML",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-
-[tool.mypy]
-python_version = "3.12"
-strict = true
-# No sqlalchemy mypy plugin: it's deprecated, and there are no ORM models to type anyway
-plugins = ["pydantic.mypy"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = ["db: needs the PostGIS test database (POSTGRES_* settings)"]
-addopts = "--strict-markers"   # a typo'd marker fails instead of silently selecting nothing
-
-[build-system]
-# uv's own backend; capped at the next minor so a uv release can't change how we build
-requires = ["uv_build>=0.11.15,<0.12"]
-build-backend = "uv_build"
-
-[tool.uv.build-backend]
-# Default would be src/iris_sig_08_harvester/ (derived from the project name)
-module-name = "harvester"
-
-[project.scripts]
-harvester = "harvester.cli:main"
-```
-
 `uv.lock` and `.python-version` (3.12) are committed, so every checkout resolves the same
 interpreter and package versions.
 
@@ -624,57 +439,7 @@ crawler, so async gains nothing and costs complexity. So it uses:
 
 #### 2. `docker-compose.yml` ✅
 
-```yaml
-services:
-  db:
-    image: postgis/postgis:16-3.4
-    # The official image is amd64-only; on Apple Silicon it runs under emulation.
-    # Fine for <1000 rows; stated explicitly so the choice is visible.
-    platform: linux/amd64
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-iris}
-      POSTGRES_USER: ${POSTGRES_USER:-iris}
-      # No default: compose fails fast if .env doesn't set it
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    ports:
-      # Host port follows POSTGRES_PORT, the same variable config.py uses to connect
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      # Creates the separate iris_test database used by the db-marked tests.
-      # Mount the single file: mounting a folder over /docker-entrypoint-initdb.d would
-      # hide the image's own 10_postgis.sh, and PostGIS would never be installed in `iris`.
-      - ./docker/initdb/20_create_test_db.sql:/docker-entrypoint-initdb.d/20_create_test_db.sql:ro
-    healthcheck:
-      # -h 127.0.0.1 checks over TCP. During first-start init, Postgres runs a temporary
-      # socket-only server, so this stays unhealthy until the init scripts have finished.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  pgdata:
-```
-
 #### 3. `.env.example` ✅
-
-```
-# Copy to .env (gitignored) and replace the placeholder. Never commit .env.
-# docker-compose.yml and the harvester (src/harvester/config.py) both read these, so the
-# password is set once. The connection URL is built from them; no need to URL-encode it.
-POSTGRES_USER=iris
-POSTGRES_PASSWORD=<choose-a-local-password>
-POSTGRES_DB=iris
-# Database for the db-marked tests. Must match the name created in
-# docker/initdb/20_create_test_db.sql
-POSTGRES_TEST_DB=iris_test
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-
-# Optional: append an operator contact to the scraper's user agent
-# HARVESTER_USER_AGENT="IRIS-SIG-08-Harvester/1.0 (bot; contact: you@example.org)"
-```
 
 The repo commits no credential, not even a dev default. `.env` is already in `.gitignore`.
 
@@ -850,8 +615,8 @@ from harvester.models import ScrapedRecord
 @dataclass(frozen=True)
 class ScrapeError:
     url: str
-    kind: str              # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
-                           # | 'http_4xx' | 'retries_exhausted'
+    kind: str  # 'missing_id' | 'missing_title' | 'markers_not_found' | 'count_mismatch'
+    # | 'http_4xx' | 'retries_exhausted'
     message: str
     snippet: str | None = None  # marker JSON entry, truncated to 2 KB
 
@@ -925,36 +690,47 @@ Inline snippets: empty listing, cards without marker JSON, marker without `id`, 
 def test_parses_markers():
     """id, title, city-correct detail_url, lon/lat, address, raw_data from the fixture."""
 
+
 def test_listing_has_all_results():
     """52 markers although only 10 cards are rendered; matches 'von 52'."""
+
 
 def test_unescapes_title():
     """Snippet: '&quot;Am Werk&quot;' -> '"Am Werk"'."""
 
+
 def test_count_mismatch_logged():
     """Snippet: 'von 3' but 2 markers -> count_mismatch error, markers still returned."""
+
 
 def test_parses_zeitraum_from_detail():
     """'Zeitraum 12.10.2026 bis 13.11.2026' from the detail fixture."""
 
+
 def test_redirect_to_listing_gives_no_zeitraum():
     """The listing fixture has Zeitraum items in its cards; they must not be taken."""
+
 
 def test_other_records_detail_page_gives_no_zeitraum():
     """Detail page of 1069133 read for record 1066719 -> None."""
 
+
 def test_handles_empty_listing():
     """Snippet: no markers, no cards -> no records, no errors, no exception."""
 
+
 def test_cards_without_markers_is_an_error():
     """Snippet: cards present but no marker JSON -> markers_not_found error."""
+
 
 def test_handles_malformed_markers():
     """Snippet: marker without id, marker with blank title -> ScrapeErrors with snippet;
     the others still parsed."""
 
+
 def test_scrape_reads_every_city_and_status():
     """mock_client: one listing served, one 404 -> its records plus one http_4xx error."""
+
 
 def test_fetch_detail_adds_zeitraum(): ...
 def test_fetch_detail_failure_raises(): ...

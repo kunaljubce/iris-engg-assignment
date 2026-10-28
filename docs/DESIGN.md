@@ -23,68 +23,104 @@ Only industrial matches are stored: the objective says *filter*. Non-matching re
 
 No secondary indexes: at <1000 rows a sequential scan beats any index, and nothing queries the geometry spatially except validation, which reads every row anyway. The only index besides the primary key is the one behind `uq_source_record`, which `ON CONFLICT` requires.
 
-### `iris_staging.ingest_run`
+1. `iris_staging.ingest_run` - Tracks each harvester execution for auditability and quality reporting.
+2. `iris_staging.signal_ingest` - Stores the actual details of the filtered industrial land-use zoning hearings near Dresden and Leipzig.
 
-Tracks each harvester execution for auditability and quality reporting.
+### Upsert Logic
 
-```sql
-CREATE TABLE iris_staging.ingest_run (
-    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    started_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    finished_at          TIMESTAMPTZ,
-    source               TEXT NOT NULL,         -- 'sachsen_portal'
-    city                 TEXT,                  -- 'dresden' | 'leipzig' | NULL (run covers all cities)
-    status               TEXT NOT NULL DEFAULT 'running'
-                         CHECK (status IN ('running', 'completed', 'failed')),
-    -- NOT NULL so the quality report's sums never meet a NULL
-    records_scraped      INTEGER NOT NULL DEFAULT 0,
-    records_filtered_out INTEGER NOT NULL DEFAULT 0,  -- parsed fine, not industrial
-    records_rejected     INTEGER NOT NULL DEFAULT 0,  -- unusable (no ID or title), see errors
-    records_inserted     INTEGER NOT NULL DEFAULT 0,
-    records_updated      INTEGER NOT NULL DEFAULT 0,  -- already present, rewritten
-    errors               JSONB NOT NULL DEFAULT '[]'::jsonb,
-    config_snapshot      JSONB,                 -- frozen copy of settings used
-    error_message        TEXT
-);
-```
+Idempotency comes from the natural key: `uq_source_record UNIQUE (source, source_record_id)` plus `INSERT ... ON CONFLICT DO UPDATE`. Re-running over the same data cannot add rows. There is **no change detection**: an existing row is always rewritten with the latest values. Nothing in the brief consumes "what changed", so telling a real change apart from a re-scrape isn't worth a hash column and its tests (see "What We Are NOT Doing").
 
-### `iris_staging.signal_ingest`
+**Step 0: de-duplicate the batch in Python.** Records are written one statement each, so a repeated key would not fail, but it would be written twice and counted as 1 inserted + 1 updated for a single row, and the repeat (a source problem) would go unseen. Records with a repeated `(source, source_record_id)` in one batch (e.g. a procedure that moves from `AKTUELLE` to `BEENDETE` between the two listing requests) are collapsed to the last occurrence. Each one dropped is logged to `ingest_run.errors` as `duplicate_in_batch`.
+
+**Step 1: insert or overwrite.**
 
 ```sql
-CREATE TABLE iris_staging.signal_ingest (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source           TEXT NOT NULL,             -- 'sachsen_portal'
-    source_record_id TEXT NOT NULL,             -- marker id
-    ingest_run_id    UUID NOT NULL REFERENCES iris_staging.ingest_run(id),  -- run that last wrote the row
-
-    city             TEXT NOT NULL,             -- 'dresden' | 'leipzig'
-    title            TEXT NOT NULL,
-    detail_url       TEXT NOT NULL,             -- traceability: every row links back to its source
-    location_text    TEXT,                      -- street address as the source gives it
-
-    publication_date DATE,                      -- start of the detail page's "Zeitraum"; NULL if none
-
-    -- Only industrial matches are stored, so there is always at least one keyword
-    matched_keywords TEXT[] NOT NULL CHECK (cardinality(matched_keywords) > 0),
-
-    geometry         GEOMETRY(Point, 25832),
-    geocode_status   TEXT NOT NULL
-                     CHECK (geocode_status IN
-                            ('source_coordinates', 'unresolved', 'rejected_out_of_bounds')),
-    geocode_reason   TEXT,                      -- why unresolved/rejected, e.g. 'marker has no coordinates'
-
-    quality_flags    TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'missing_publication_date', 'missing_location',
-                                                    -- 'unparseable_date', 'detail_page_failed'
-    raw_data         JSONB NOT NULL,            -- all scraped fields as-is, plus filter evidence
-
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- first seen
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- last written, i.e. last seen
-
-    -- Named: ON CONFLICT and the tests refer to it
-    CONSTRAINT uq_source_record UNIQUE (source, source_record_id),
-    -- A point exists exactly when the source gave usable coordinates: the database itself
-    -- refuses a point without that status, or that status without a point
-    CONSTRAINT ck_geometry_matches_status
-        CHECK ((geocode_status = 'source_coordinates') = (geometry IS NOT NULL))
-);
+INSERT INTO iris_staging.signal_ingest (
+    source, source_record_id, ingest_run_id,
+    city, title, detail_url, location_text,
+    publication_date, matched_keywords,
+    geometry, geocode_status, geocode_reason, quality_flags, raw_data
+)
+VALUES (
+    ...,
+    -- WGS84 -> EPSG:25832 in PostGIS (no pyproj). NULL lon/lat (unresolved or rejected)
+    -- gives a NULL geometry; the bounding box was checked in Python before this
+    ST_Transform(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), 25832),
+    ...
+)
+ON CONFLICT (source, source_record_id) DO UPDATE SET
+    ingest_run_id    = EXCLUDED.ingest_run_id,
+    city             = EXCLUDED.city,
+    title            = EXCLUDED.title,
+    detail_url       = EXCLUDED.detail_url,
+    location_text    = EXCLUDED.location_text,
+    publication_date = EXCLUDED.publication_date,
+    matched_keywords = EXCLUDED.matched_keywords,
+    geometry         = EXCLUDED.geometry,
+    geocode_status   = EXCLUDED.geocode_status,
+    geocode_reason   = EXCLUDED.geocode_reason,
+    quality_flags    = EXCLUDED.quality_flags,
+    raw_data         = EXCLUDED.raw_data,
+    updated_at       = NOW()
+RETURNING (xmax = 0) AS inserted;
 ```
+
+**Counting:** `inserted` = rows returned with `inserted = true`; `updated` = the rest. A re-run over unchanged data therefore reports 0 inserted and N updated, with the row count and every `id` and `created_at` unchanged.
+
+`xmax = 0` is the standard PostgreSQL test for whether a row from an `ON CONFLICT` upsert was newly inserted. It's covered by a test.
+
+**How it's executed:** the statement is a SQLAlchemy `text()` with named parameters, run with one parameter dict per record (no ORM models; see Phase 1). psycopg 3 adapts Python lists to `TEXT[]`. Dicts for `JSONB` must be wrapped in `psycopg.types.json.Jsonb(...)`, or binding fails. Records are executed one statement each, in a loop inside the batch's single transaction, collecting each `RETURNING` row. That's simple, keeps the per-record counting obvious, and is fast enough for <1000 rows; collecting `RETURNING` rows from one `executemany` call isn't something to rely on with `text()`.
+
+**Rows are never deleted.** A plan that disappears from the portal, or stops matching after the keyword list changes, keeps its row; its `ingest_run_id` then points at an older run than the latest one covering its city (validation check 9 lists these).
+
+## Industrial Keyword Filter
+
+Plan titles are usually German compounds ("Gewerbestandort Nord", "Logistikzentrum Radefeld", "Kleingewerbe am Bahnhof"), so whole-word matching misses most real hits. The filter uses two kinds of match:
+
+- **Long keywords** (Gewerbe, Industrie, Logistik, ...) match case-insensitively **anywhere inside a word**. The whole word containing the hit is kept as evidence.
+- **Short codes** (GE, GI, GVZ) match **case-sensitively as whole tokens only**. As substrings they would hit ordinary words ("gegen", "Gießen").
+
+```python
+import re
+from dataclasses import dataclass, field
+
+from harvester.config import IndustrialFilterConfig
+
+
+@dataclass(frozen=True)
+class FilterResult:
+    is_industrial: bool
+    matched_keywords: list[str] = field(default_factory=list)  # keywords as written in config
+    evidence: list[str] = field(default_factory=list)  # matched words, e.g. "Gewerbestandort"
+
+
+class IndustrialFilter:
+    def __init__(self, config: IndustrialFilterConfig) -> None:
+        # \w* on both sides captures the whole compound word around the keyword as evidence
+        self._patterns = [
+            *((kw, re.compile(rf"\w*{re.escape(kw)}\w*", re.IGNORECASE)) for kw in config.keywords),
+            *((tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in config.case_sensitive_tokens),
+        ]
+
+    def check(self, title: str) -> FilterResult:
+        keywords: list[str] = []
+        evidence: list[str] = []
+        for keyword, pattern in self._patterns:
+            hits = pattern.findall(title)
+            if hits:
+                keywords.append(keyword)
+                evidence.extend(hits)
+
+        unique = list(dict.fromkeys(keywords))
+        return FilterResult(
+            is_industrial=bool(unique),
+            matched_keywords=unique,
+            evidence=list(dict.fromkeys(evidence)),
+        )
+```
+
+`evidence` goes into `raw_data` and the quality report, so false positives (e.g. "Wohn- und Gewerbepark", a mixed area) can be spotted and the keyword list tuned.
+
+Only the title is read; see "What We Are NOT Doing" for why not descriptions. The filter runs on listing data, **before** any detail page is fetched, so only matches cost an extra request. Only records with `is_industrial = True` are stored; `matched_keywords` is the stored evidence for why each row is there. Non-matches are counted in `ingest_run.records_filtered_out`, and `--dry-run` prints every record with its filter decision, so false negatives can be checked while tuning the keyword list.
+
+---
