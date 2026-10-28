@@ -207,7 +207,7 @@ docker compose down
 docker compose down -v
 ```
 
-To inspect the schema SQL without a database or `.env`: `uv run alembic upgrade head --sql`
+To inspect the schema SQL without a database: `uv run alembic upgrade head --sql`
 
 Notes:
 
@@ -292,7 +292,6 @@ iris-engg-assignment/
     DESIGN.md                       # design decisions, schema, upsert, filter
     IMPLEMENTATION.md               # how each module behaves
     TESTS.md                        # test strategy and infrastructure
-    2026-10-27-IRIS-SIG-08-saxony-portal-harvester.md  # implementation plan
   README.md
 ```
 
