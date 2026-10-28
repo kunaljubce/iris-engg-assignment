@@ -69,6 +69,11 @@ Why the second source: the state portal lists only the procedures Leipzig publis
   `missing_publication_date` or `detail_page_failed` in `quality_flags`. Records that
   can't be used at all (no ID or title) are not stored; they are counted as `rejected`
   with the error on the run.
+- **Finished state-portal hearings are kept.** Each state-portal entry is a hearing with
+  its own "Zeitraum", whether it is still open (`AKTUELLE`) or over (`BEENDETE`), so both
+  are read. A Leipzig register plan in force ("rechtskräftig") is not a hearing record at
+  all, so it is left out. Whether a hearing is still open shows in `raw_data`: the
+  `listing_url` has its status, and the "Zeitraum" text has its end date.
 - **Each portal's copy of a plan is its own row,** with its own ID and URL (see the
   limitations).
 
@@ -304,6 +309,12 @@ tests against a PostGIS 16-3.4 service on every push to `main`. The badge at the
 shows the result; it only renders while the repository is public.
 
 ## Known limitations
+
+- **Only the two cities are covered.** "Around Dresden and Leipzig" is read as the cities
+  themselves: the state portal's Dresden and Leipzig listings and Leipzig's register.
+  Hearings run by surrounding municipalities or districts (e.g. Meißen, Nordsachsen) are
+  not read. Any that publish on the state portal can be added as a `cities` entry plus a
+  bounding box in `settings.yml`, with no code changes.
 
 - **The filter reads titles only.** A plan whose title names a place but not the use is
   missed. For example, Leipzig's "Bebauungsplan Nr. 422 Radefelder Allee West" has no

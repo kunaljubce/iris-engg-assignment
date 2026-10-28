@@ -1800,6 +1800,14 @@ Decided in this plan; confirm or update each one as the step is built.
   live run, which the fixture tests can't see; anyone can run them with `psql`.
 - **Why does the stale-rows query match the run's city?** A `--city dresden` run doesn't
   touch Leipzig rows; without the city condition they would all look stale.
+- **Why keep finished (`BEENDETE`) state-portal hearings but not "rechtskräftig" register
+  plans?** A state-portal entry is a hearing record with its own Zeitraum, open or over; a
+  register plan in force is not a hearing record. Live 2026-10-28, 7 of the 9 state-portal
+  rows are finished hearings. Open vs finished shows in `raw_data` (listing URL status,
+  Zeitraum end).
+- **Why read "around Dresden and Leipzig" as the two cities?** The brief names the state
+  portal, whose Dresden and Leipzig listings are the cities' own. Surrounding
+  municipalities are a `cities` entry each (README limitation), not a code change.
 
 ### Success Criteria
 
