@@ -1,5 +1,7 @@
 # iris-engg-assignment
 
+[![tests](https://github.com/kunaljubce/iris-engg-assignment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunaljubce/iris-engg-assignment/actions/workflows/ci.yml)
+
 Filter industrial land-use zoning hearings around Dresden and Leipzig.
 
 Sources, both public pages fetched with plain HTTP GET requests (no browser needed):

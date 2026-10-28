@@ -1535,6 +1535,13 @@ def test_errors_visible_in_ingest_run(db_session, mock_client):
 
 Decided in this plan; confirm or update each one as the step is built.
 
+- **What does CI check, and when?** `.github/workflows/ci.yml` runs on every push to main:
+  ruff, mypy, the migrations (up, down, up) and the whole pytest suite, including the db tests
+  against a `postgis/postgis:16-3.4` service container. The README badge shows the latest
+  result on main (green "passing" / red "failing"). (Built before Phase 4)
+- **Why trust auth in CI rather than a password secret?** The database is a throwaway container
+  on the runner, so there is no credential to store or leak; `POSTGRES_PASSWORD` is set only
+  because `DatabaseSettings` requires a value. (Built before Phase 4)
 - **How is the run idempotent?** `UNIQUE (source, source_record_id)` plus `ON CONFLICT DO
   UPDATE`; a re-run can't add rows.
 - **Why no change detection (hash column)?** Nothing in the brief consumes "what changed"; an

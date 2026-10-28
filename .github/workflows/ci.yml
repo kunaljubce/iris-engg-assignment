@@ -1,0 +1,60 @@
+# Lint, type checks, migrations and the full test suite (unit + db-marked) on every push to
+# main. The README badge shows this workflow's latest result on main.
+name: tests
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    services:
+      db:
+        # Same image as docker-compose.yml
+        image: postgis/postgis:16-3.4
+        env:
+          # The image installs PostGIS into POSTGRES_DB, so iris_test gets it directly
+          POSTGRES_DB: iris_test
+          POSTGRES_USER: iris
+          # Throwaway container on the runner: trust auth means no password exists to leak
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U iris -d iris_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: iris
+      # CI has only the test database; migrations and db tests both target it
+      POSTGRES_DB: iris_test
+      POSTGRES_TEST_DB: iris_test
+      # DatabaseSettings requires a value; trust auth never checks it
+      POSTGRES_PASSWORD: unused-trust-auth
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.15"
+
+      # Python version from .python-version; --locked fails if uv.lock is out of date
+      - run: uv sync --extra dev --locked
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy .
+
+      # Migrations apply and reverse cleanly on a real PostGIS
+      - run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+      - run: uv run pytest -v
